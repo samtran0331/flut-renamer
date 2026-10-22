@@ -520,10 +520,7 @@ class FilesPageState extends State<FilesPage> {
 
     setState(() {
       _invalidateNewNamesForOrderChange();
-      _files.sort((left, right) {
-        final comparison = compareFiles(left, right, field);
-        return ascending ? comparison : -comparison;
-      });
+      sortFiles(_files, field, ascending: ascending);
     });
   }
 
