@@ -12,18 +12,24 @@ import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
 import android.provider.DocumentsContract
+import androidx.activity.enableEdgeToEdge
 import androidx.exifinterface.media.ExifInterface
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.provider.OpenableColumns
 import android.os.Handler
 import android.os.Looper
 
-class MainActivity: FlutterActivity() {
+class MainActivity: FlutterFragmentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+    }
     private val CHANNEL = "net.sunjiao.renamer/picker"
     private val REQUEST_CODE_OPEN_DOC = 1
     private val REQUEST_CODE_OPEN_TREE = 2

@@ -114,6 +114,7 @@ flutter {
 }
 
 dependencies {
+    implementation("androidx.activity:activity:1.9.3")
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("androidx.exifinterface:exifinterface:1.4.2")
     testImplementation("junit:junit:4.13.2")
