@@ -1458,16 +1458,7 @@ class L10n {
     num insertIndex,
   ) {
     return Intl.message(
-      'Insert "$insert" at the $insertIndex${Intl.select(ordinal, {
-            'o1': 'st',
-            'o2': 'nd',
-            'o3': 'rd',
-            'other': 'th'
-          })}${Intl.select(toEnd, {
-            'true': '-to-end',
-            'false': '',
-            'other': ''
-          })} character.',
+      'Insert "$insert" at the $insertIndex${Intl.select(ordinal, {'o1': 'st', 'o2': 'nd', 'o3': 'rd', 'other': 'th'})}${Intl.select(toEnd, {'true': '-to-end', 'false': '', 'other': ''})} character.',
       name: 'insertToString',
       desc: '',
       args: [toEnd, ordinal, insert, insertIndex],
@@ -1525,29 +1516,7 @@ class L10n {
     num iTwo,
   ) {
     return Intl.message(
-      'Truncate: ${Intl.select(keepType, {
-            'true': 'keep only',
-            'false': 'remove',
-            'other': ''
-          })} characters between the $iOne${Intl.select(iTwoOrdinal, {
-            'o1': 'st',
-            'o2': 'nd',
-            'o3': 'rd',
-            'other': 'th'
-          })}${Intl.select(iOneToEnd, {
-            'true': '-to-end',
-            'false': '',
-            'other': ''
-          })} character and the $iTwo${Intl.select(iOneOrdinal, {
-            'o1': 'st',
-            'o2': 'nd',
-            'o3': 'rd',
-            'other': 'th'
-          })}${Intl.select(iTwoToEnd, {
-            'true': '-to-end',
-            'false': '',
-            'other': ''
-          })}.',
+      'Truncate: ${Intl.select(keepType, {'true': 'keep only', 'false': 'remove', 'other': ''})} characters between the $iOne${Intl.select(iTwoOrdinal, {'o1': 'st', 'o2': 'nd', 'o3': 'rd', 'other': 'th'})}${Intl.select(iOneToEnd, {'true': '-to-end', 'false': '', 'other': ''})} character and the $iTwo${Intl.select(iOneOrdinal, {'o1': 'st', 'o2': 'nd', 'o3': 'rd', 'other': 'th'})}${Intl.select(iTwoToEnd, {'true': '-to-end', 'false': '', 'other': ''})}.',
       name: 'truncateToString',
       desc: '',
       args: [
@@ -1739,16 +1708,7 @@ class L10n {
     String filename,
   ) {
     return Intl.message(
-      '${Intl.select(selectStatus, {
-            'true': 'Selected',
-            'false': 'Unselected',
-            'other': ''
-          })} ${Intl.select(entityType, {
-            'File': 'File',
-            'Directory': 'Folder',
-            'Link': 'Link',
-            'other': 'File system entity'
-          })}, filename is $filename, ',
+      '${Intl.select(selectStatus, {'true': 'Selected', 'false': 'Unselected', 'other': ''})} ${Intl.select(entityType, {'File': 'File', 'Directory': 'Folder', 'Link': 'Link', 'other': 'File system entity'})}, filename is $filename, ',
       name: 'semanticsFileManagerTitle',
       desc: '',
       args: [entityType, selectStatus, filename],
@@ -1848,11 +1808,7 @@ class L10n {
   /// `Switching counting direction between from the beginning and from the end, currently counting from {toEnd, select, true{the end} false{the beginning} other{}}`
   String semanticSwitchNumberToStartAndToEnd(String toEnd) {
     return Intl.message(
-      'Switching counting direction between from the beginning and from the end, currently counting from ${Intl.select(toEnd, {
-            'true': 'the end',
-            'false': 'the beginning',
-            'other': ''
-          })}',
+      'Switching counting direction between from the beginning and from the end, currently counting from ${Intl.select(toEnd, {'true': 'the end', 'false': 'the beginning', 'other': ''})}',
       name: 'semanticSwitchNumberToStartAndToEnd',
       desc: '',
       args: [toEnd],

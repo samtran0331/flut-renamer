@@ -154,7 +154,8 @@ class FilesPageState extends State<FilesPage> {
         allowedExtensions: ['csv', 'tsv'],
       );
       if (file == null || !mounted) return;
-      if (await file.length() > RenameMapping.maxBytes) {
+      final fileLength = await file.length();
+      if (fileLength != null && fileLength > RenameMapping.maxBytes) {
         throw const MappingException(1, MappingError.tooLarge);
       }
       final bytes = await file.readAsBytes();
@@ -195,8 +196,6 @@ class FilesPageState extends State<FilesPage> {
       await FilePicker.saveFile(
         dialogTitle: L10n.current.exportMapping,
         fileName: 'rename-mapping.csv',
-        type: FileType.custom,
-        allowedExtensions: ['csv'],
         bytes: Uint8List.fromList([0xef, 0xbb, 0xbf, ...utf8.encode(text)]),
       );
     } catch (error) {

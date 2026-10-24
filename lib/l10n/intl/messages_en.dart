@@ -25,6 +25,8 @@ class MessageLookup extends MessageLookupByLibrary {
   static String m1(toEnd, ordinal, insert, insertIndex) =>
       "Insert \"${insert}\" at the ${insertIndex}${Intl.select(ordinal, {'o1': 'st', 'o2': 'nd', 'o3': 'rd', 'other': 'th'})}${Intl.select(toEnd, {'true': '-to-end', 'false': '', 'other': ''})} character.";
 
+  static String m15(row, reason) => "Row ${row}: ${reason}";
+
   static String m2(delimiter, order) =>
       "Rearrange: delimiter: ${delimiter}, order: ${order}.";
 
@@ -67,8 +69,6 @@ class MessageLookup extends MessageLookupByLibrary {
   ) =>
       "Truncate: ${Intl.select(keepType, {'true': 'keep only', 'false': 'remove', 'other': ''})} characters between the ${iOne}${Intl.select(iTwoOrdinal, {'o1': 'st', 'o2': 'nd', 'o3': 'rd', 'other': 'th'})}${Intl.select(iOneToEnd, {'true': '-to-end', 'false': '', 'other': ''})} character and the ${iTwo}${Intl.select(iOneOrdinal, {'o1': 'st', 'o2': 'nd', 'o3': 'rd', 'other': 'th'})}${Intl.select(iTwoToEnd, {'true': '-to-end', 'false': '', 'other': ''})}.";
 
-  static String m15(row, reason) => "Row ${row}: ${reason}";
-
   final messages = _notInlinedMessages(_notInlinedMessages);
   static Map<String, Function> _notInlinedMessages(_) => <String, Function>{
     "aboutContent": MessageLookupByLibrary.simpleMessage(
@@ -97,6 +97,9 @@ class MessageLookup extends MessageLookupByLibrary {
     "cancel": MessageLookupByLibrary.simpleMessage("Cancel"),
     "cancelAll": MessageLookupByLibrary.simpleMessage("Cancel All"),
     "caseSensitive": MessageLookupByLibrary.simpleMessage("Case sensitive"),
+    "clearMapping": MessageLookupByLibrary.simpleMessage(
+      "Clear mapping and resume rules",
+    ),
     "collapseOptions": MessageLookupByLibrary.simpleMessage("Collapse options"),
     "currentName": MessageLookupByLibrary.simpleMessage("Current name"),
     "dateFormat": MessageLookupByLibrary.simpleMessage("Date format"),
@@ -144,6 +147,9 @@ class MessageLookup extends MessageLookupByLibrary {
       "Cannot access external storage",
     ),
     "expandOptions": MessageLookupByLibrary.simpleMessage("Expand options"),
+    "exportMapping": MessageLookupByLibrary.simpleMessage(
+      "Export current preview as CSV",
+    ),
     "fileAlreadyExists": MessageLookupByLibrary.simpleMessage(
       "Filename already used by another file",
     ),
@@ -186,6 +192,9 @@ class MessageLookup extends MessageLookupByLibrary {
       "If files does not shown in file list, please clear all and continue.",
     ),
     "ignoreExtension": MessageLookupByLibrary.simpleMessage("Ignore Extension"),
+    "importMapping": MessageLookupByLibrary.simpleMessage(
+      "Import CSV / TSV mapping",
+    ),
     "importRulesAfter": MessageLookupByLibrary.simpleMessage(
       "Add after existing rules",
     ),
@@ -233,6 +242,29 @@ class MessageLookup extends MessageLookupByLibrary {
     "loadRules": MessageLookupByLibrary.simpleMessage("Load Rules"),
     "logEmpty": MessageLookupByLibrary.simpleMessage("Log is empty."),
     "lowercaseAppName": MessageLookupByLibrary.simpleMessage("flut renamer"),
+    "mappingActive": MessageLookupByLibrary.simpleMessage(
+      "Mapping mode: rules paused; only mapped items are targeted.",
+    ),
+    "mappingDuplicateError": MessageLookupByLibrary.simpleMessage(
+      "Duplicate source. Each source may appear only once.",
+    ),
+    "mappingFormatError": MessageLookupByLibrary.simpleMessage(
+      "Invalid UTF-8 CSV/TSV. Use source,new_name headers and two columns, with at least one mapping.",
+    ),
+    "mappingHint": MessageLookupByLibrary.simpleMessage(
+      "Import a UTF-8 table with source,new_name columns. Sources must already be loaded.",
+    ),
+    "mappingMenu": MessageLookupByLibrary.simpleMessage("Naming table"),
+    "mappingNameError": MessageLookupByLibrary.simpleMessage(
+      "New name must be a filename, without path separators, control characters, reserved names or trailing dots/spaces.",
+    ),
+    "mappingRowError": m15,
+    "mappingSizeError": MessageLookupByLibrary.simpleMessage(
+      "Mapping files must not exceed 5 MiB.",
+    ),
+    "mappingSourceError": MessageLookupByLibrary.simpleMessage(
+      "Source must be an absolute path or content URI matching a loaded item. Export a template first.",
+    ),
     "me": MessageLookupByLibrary.simpleMessage("Montenegrin"),
     "metadataParserNotProvided": MessageLookupByLibrary.simpleMessage(
       "Contains metadata tag while MetadataParser was not provided.",
@@ -374,18 +406,6 @@ class MessageLookup extends MessageLookupByLibrary {
     "renameFailed": MessageLookupByLibrary.simpleMessage("Rename failed"),
     "renameScope": MessageLookupByLibrary.simpleMessage("Rename scope"),
     "renameTargetSummary": m5,
-    "mappingMenu": MessageLookupByLibrary.simpleMessage("Naming table"),
-    "importMapping": MessageLookupByLibrary.simpleMessage("Import CSV / TSV mapping"),
-    "exportMapping": MessageLookupByLibrary.simpleMessage("Export current preview as CSV"),
-    "clearMapping": MessageLookupByLibrary.simpleMessage("Clear mapping and resume rules"),
-    "mappingHint": MessageLookupByLibrary.simpleMessage("Import a UTF-8 table with source,new_name columns. Sources must already be loaded."),
-    "mappingActive": MessageLookupByLibrary.simpleMessage("Mapping mode: rules paused; only mapped items are targeted."),
-    "mappingRowError": m15,
-    "mappingFormatError": MessageLookupByLibrary.simpleMessage("Invalid UTF-8 CSV/TSV. Use source,new_name headers and two columns, with at least one mapping."),
-    "mappingSourceError": MessageLookupByLibrary.simpleMessage("Source must be an absolute path or content URI matching a loaded item. Export a template first."),
-    "mappingDuplicateError": MessageLookupByLibrary.simpleMessage("Duplicate source. Each source may appear only once."),
-    "mappingNameError": MessageLookupByLibrary.simpleMessage("New name must be a filename, without path separators, control characters, reserved names or trailing dots/spaces."),
-    "mappingSizeError": MessageLookupByLibrary.simpleMessage("Mapping files must not exceed 5 MiB."),
     "replace": MessageLookupByLibrary.simpleMessage("Replace"),
     "replaceOriginalName": MessageLookupByLibrary.simpleMessage(
       "Replace original name",

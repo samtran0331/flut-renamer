@@ -38,8 +38,8 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   args: ^2.7.0
-  audio_metadata_reader: ^1.8.0
-  cross_file: ^0.3.5+5
+  audio_metadata_reader: ^1.8.1
+  cross_file: ^0.3.5+4
   crypto: ^3.0.7
   cyrtranslit: ^1.0.1
   desktop_drop:
@@ -47,17 +47,17 @@ dependencies:
       url: https://github.com/sun-jiao/flutter-plugins.git
       path: packages/desktop_drop
   exif: ^3.3.0
-  ffi: ^2.1.4
+  ffi: ^2.2.0
   file_manager: ^1.0.2
-  file_picker: ^12.2.0
-  fluttertoast: ^10.0.0
+  file_picker: ^13.2.0
+  fluttertoast: ^10.0.2
   intl: ^0.20.3
-  package_info_plus: ^10.2.1
+  package_info_plus: ^10.2.2
   path: any
   pinyin: ^3.3.0
-  shared_preferences: ^2.5.5
+  shared_preferences: ^2.5.6
   toastification: ^3.2.0
-  url_launcher: ^6.3.2
+  url_launcher: ^6.3.3
   uuid: ^4.6.0
   yaml: ^3.1.4
   yaml_writer: ^2.1.0
@@ -77,8 +77,8 @@ dev_dependencies:
   change_app_package_name: ^1.5.0
   flutter_launcher_icons: ^0.14.4
   flutter_lints: ^6.0.0
-  intl_utils: ^2.8.16
-  xml: ^7.0.1
+  intl_utils: ^2.8.17
+  xml: ^7.1.0
 
 # dart run flutter_launcher_icons
 flutter_icons:
