@@ -1,51 +1,257 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:fluttertoast/fluttertoast.dart';
 
 import '../entity/theme_extension.dart';
 import '../l10n/l10n.dart';
-import '../pages/android_file_picker_page.dart';
 import '../tools/platform_channel.dart';
 import '../entity/constants.dart';
 import '../tools/ex_file.dart';
+import '../tools/file_sort.dart';
 import '../tools/file_metadata.dart';
 import '../entity/sharedpref.dart';
 import '../tools/rename.dart';
+import '../tools/rename_mapping.dart';
+import '../tools/rename_transaction.dart';
+import '../tools/app_haptics.dart';
 import '../widget/custom_dialog.dart';
 import '../widget/custom_drop.dart';
+import '../widget/file_thumbnail.dart';
+
+enum RenameScope { visible, all, selected }
 
 class FilesPage extends StatefulWidget {
   const FilesPage({
     super.key,
+    this.showThumbnails = false,
     required this.getNewName,
     required this.clearRules,
     required this.resetRules,
+    required this.dependsOnFileOrder,
+    required this.requiresMetadata,
+    this.onRenamingChanged,
+    this.onTargetCountChanged,
   });
 
-  final FutureOr<String> Function(String name, FileMetadata metadata) getNewName;
+  final bool showThumbnails;
+  final ValueChanged<int>? onTargetCountChanged;
+
+  final FutureOr<String> Function(String name, FileMetadata metadata)
+      getNewName;
   final VoidCallback clearRules;
   final VoidCallback resetRules;
+
+  /// Whether changing the list order changes generated names.  Increment is
+  /// currently the only rule with this property.
+  final bool Function() dependsOnFileOrder;
+
+  /// Whether any active rule will read metadata while generating a name.
+  final bool Function() requiresMetadata;
+
+  /// Lets the parent lock rule/settings edits for the same operation.
+  final ValueChanged<bool>? onRenamingChanged;
 
   @override
   State<FilesPage> createState() => FilesPageState();
 
-  static void addFiles(Iterable<FileSystemEntity> files) {
-    _files.addAll(files);
+  static void addFiles(Iterable<FileEntity> files) {
+    _addUniqueFiles(files);
   }
 }
 
-final List<FileSystemEntity> _files = [];
+final List<FileEntity> _files = [];
+
+void _addUniqueFiles(Iterable<FileEntity> files) {
+  final paths = _files.map((file) => file.path).toSet();
+  _files.addAll(files.where((file) => paths.add(file.path)));
+}
 
 class FilesPageState extends State<FilesPage> {
+  RenameScope _scope =
+      Shared.onlySelected ? RenameScope.selected : RenameScope.visible;
+  int? _reportedTargetCount;
+  Map<FileEntity, String>? _mapping;
+
+  /// Changes the target scope while keeping the preview in sync.
+  void setRenameScope(RenameScope value) {
+    if (_renaming || value == _scope) return;
+    setState(() {
+      _scope = value;
+      Shared.onlySelected = value == RenameScope.selected;
+      _invalidateNewNames();
+    });
+  }
+
+  /// Import is atomic: invalid rows leave the previous mapping untouched.
+  void importRenameMapping(String text, {String delimiter = ','}) {
+    if (_renaming) return;
+    _applyRenameMapping(text, delimiter: delimiter);
+  }
+
+  void _applyRenameMapping(String text, {required String delimiter}) {
+    final parsed = RenameMapping.parse(
+      text,
+      _files.map((file) => file.path),
+      delimiter: delimiter,
+    );
+    final parsedByKey = {
+      for (final entry in parsed.entries)
+        RenameMapping.sourceKey(entry.key): entry.value,
+    };
+    setState(() {
+      _mapping = {
+        for (final file in _files)
+          if (parsedByKey.containsKey(RenameMapping.sourceKey(file.path)))
+            file: parsedByKey[RenameMapping.sourceKey(file.path)]!,
+      };
+      _invalidateNewNames();
+    });
+  }
+
+  Future<void> _mappingError(Object error) async {
+    if (!mounted) return;
+    final message = error is MappingException
+        ? L10n.current.mappingRowError(
+            error.row,
+            switch (error.reason) {
+              MappingError.format => L10n.current.mappingFormatError,
+              MappingError.source => L10n.current.mappingSourceError,
+              MappingError.duplicate => L10n.current.mappingDuplicateError,
+              MappingError.name => L10n.current.mappingNameError,
+              MappingError.tooLarge => L10n.current.mappingSizeError,
+            },
+          )
+        : error is FormatException
+            ? L10n.current.mappingFormatError
+            : error.toString();
+    await showDialog<void>(
+      context: context,
+      builder: (context) => CustomDialog(
+        title: Text(L10n.current.appError),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(L10n.current.ok),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _importMappingFile() async {
+    if (_renaming) return;
+    _setRenaming(true);
+    try {
+      final file = await FilePicker.pickFile(
+        dialogTitle: L10n.current.importMapping,
+        type: FileType.custom,
+        allowedExtensions: ['csv', 'tsv'],
+      );
+      if (file == null || !mounted) return;
+      final fileLength = await file.length();
+      if (fileLength != null && fileLength > RenameMapping.maxBytes) {
+        throw const MappingException(1, MappingError.tooLarge);
+      }
+      final bytes = await file.readAsBytes();
+      if (!mounted) return;
+      if (bytes.length > RenameMapping.maxBytes) {
+        throw const MappingException(1, MappingError.tooLarge);
+      }
+      _applyRenameMapping(
+        utf8.decode(bytes),
+        delimiter: file.name.toLowerCase().endsWith('.tsv') ? '\t' : ',',
+      );
+    } catch (error) {
+      await _mappingError(error);
+    } finally {
+      if (_deferredUpdate) {
+        _deferredUpdate = false;
+        _invalidateNewNames();
+      }
+      _setRenaming(false);
+    }
+  }
+
+  Future<void> _exportMappingFile() async {
+    if (_renaming) return;
+    _setRenaming(true);
+    try {
+      final targets = _renameTargets();
+      if (targets.isEmpty) return;
+      for (final file in targets) {
+        await _newNameFuture(file);
+      }
+      if (!mounted || _deferredUpdate) return;
+      final text = RenameMapping.encode(
+        targets.map(
+          (file) => (RenameMapping.sourceKey(file.path), file.newName),
+        ),
+      );
+      await FilePicker.saveFile(
+        dialogTitle: L10n.current.exportMapping,
+        fileName: 'rename-mapping.csv',
+        bytes: Uint8List.fromList([0xef, 0xbb, 0xbf, ...utf8.encode(text)]),
+      );
+    } catch (error) {
+      await _mappingError(error);
+    } finally {
+      if (_deferredUpdate) {
+        _deferredUpdate = false;
+        _invalidateNewNames();
+      }
+      _setRenaming(false);
+    }
+  }
+
+  void _transferMapping(FileEntity original, FileEntity replacement) {
+    final name = _mapping?.remove(original);
+    if (name != null) _mapping![replacement] = name;
+  }
+
+  List<FileEntity> _renameTargets() => (switch (_scope) {
+        RenameScope.visible => _filteredList(),
+        RenameScope.all => List.of(_files),
+        RenameScope.selected => _files.where((file) => file.selected).toList(),
+      })
+          .where((file) => _mapping == null || _mapping!.containsKey(file))
+          .toList();
+
   bool _dragging = false;
+  bool _renaming = false;
+  bool _deferredUpdate = false;
+  bool _pickingIOSFiles = false;
+
+  Future<void> _releaseUnusedIOSAccess() async {
+    if (!Platform.isIOS || _pickingIOSFiles || _renaming) return;
+    try {
+      await PlatformFilePicker.retainScopedAccess(
+        _files.map((file) => file.path),
+      );
+    } catch (error) {
+      debugPrint('Unable to release unused folder access: $error');
+    }
+  }
+
   String _filter = '';
+  FileSortField? _sortField;
+  bool _sortAscending = true;
+  int _sortGeneration = 0;
+  final Map<FileEntity, Future<void>> _newNameFutures = {};
+  int _newNameGeneration = 0;
+  Future<void>? _newNamesReady;
+  final Set<FileEntity> _collisionErrors = {};
+  int _collisionCheckRevision = 0;
+  final _BoundedTaskQueue _metadataQueue = _BoundedTaskQueue(maxConcurrent: 8);
 
   Future<void> addFileFromPicker() async {
-    late Iterable<FileSystemEntity> entities;
+    if (_renaming) return;
+    late Iterable<FileEntity> entities;
     if (Platform.isAndroid) {
       if (!Shared.doNotRemindAgain) {
         await _remindDialog(context);
@@ -54,17 +260,23 @@ class FilesPageState extends State<FilesPage> {
       if (!mounted) {
         return;
       }
-      
-      final result = await Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => const AndroidFilePicker()),
-      );
 
-      if (result != null && result is List<FileSystemEntity>) {
-        entities = result;
+      List<String>? paths;
+      if (Shared.fileOrDir == 'Directories') {
+        paths = await PlatformFilePicker.dirAccess();
       } else {
-        return;
+        paths = await PlatformFilePicker.fileAccess(context, '');
       }
+
+      if (paths == null || paths.isEmpty) return;
+      entities = paths.map((path) {
+        // A tree URI is still a `content://` URI, so it cannot be identified
+        // from its path.  Preserve the picker mode in the entity type; the
+        // list filter and the rename result both rely on it.
+        final entity =
+            Shared.fileOrDir == 'Directories' ? Directory(path) : File(path);
+        return FileEntity(entity);
+      });
     } else if (Platform.isIOS) {
       if (!Shared.doNotRemindAgain) {
         final iosOK = await _remindDialog(context);
@@ -73,78 +285,189 @@ class FilesPageState extends State<FilesPage> {
         }
       }
 
-      final dirs = await PlatformFilePicker.dirAccess();
-      if (dirs == null || dirs.first == null) {
-        return;
+      if (_pickingIOSFiles) return;
+      _pickingIOSFiles = true;
+      try {
+        final dirs = await PlatformFilePicker.dirAccess();
+        if (dirs == null || dirs.isEmpty || !mounted) return;
+        final granted =
+            await PlatformFilePicker.changeScopedAccess(dirs.first, true);
+        if (!granted) {
+          throw FileSystemException('Folder access was denied', dirs.first);
+        }
+        if (!mounted) return;
+        final files = await PlatformFilePicker.fileAccess(context, dirs.first);
+        if (files == null || !mounted || _renaming) return;
+        setState(() {
+          _addUniqueFiles(files.map((path) => path.toFileEntity()));
+        });
+      } catch (error) {
+        if (mounted) {
+          await showDialog<void>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: Text(L10n.current.appError),
+              content: Text(error.toString()),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(L10n.current.ok),
+                ),
+              ],
+            ),
+          );
+        }
+      } finally {
+        _pickingIOSFiles = false;
+        await _releaseUnusedIOSAccess();
       }
-
-      if (!_files.any((e) => e.parent.path == dirs.first.toString())) {
-        await PlatformFilePicker.changeScopedAccess(dirs.first.toString(), true);
-      }
-
-      final files = await PlatformFilePicker.fileAccess(dirs.first.toString());
-      if (files == null) {
-        return;
-      }
-
-      entities = files.skipWhile((e) => e == null).map((e) => e.toString()).map((e) => e.toFileSystemEntity());
+      return;
     } else {
-      FilePickerResult? result = await FilePicker.platform.pickFiles(allowMultiple: true);
-      if (result != null) {
-        entities = result.files
-            .where((e1) => e1.path != null && _files.every((e2) => e1.path != e2.path))
-            .map((e) => e.toFileSystemEntity());
+      final result = await FilePicker.pickFiles();
+      if (result.isNotEmpty) {
+        entities = result
+            .where(
+              (e1) =>
+                  e1.path != null && _files.every((e2) => e1.path != e2.path),
+            )
+            .map((e) => e.toFileEntity());
       } else {
         return;
       }
     }
+    if (!mounted || _renaming) return;
     setState(() {
-      _files.addAll(entities.skipWhile((eNew) => _files.any((eOld) => eNew.path == eOld.path)));
+      _addUniqueFiles(entities);
     });
   }
 
   Future<bool?> _remindDialog(BuildContext contextD) => showDialog<bool>(
-    context: contextD,
-    builder: (contextD) => CustomDialog(
-      title: Text(Platform.isIOS ? L10n.current.iosRemindTitle : L10n.current.androidRemindTitle),
-      content: Text(Platform.isIOS ? L10n.current.iosRemindContent : L10n.current.androidRemindContent),
-      actions: [
-        if (Platform.isIOS) TextButton(
-          onPressed: () => Navigator.pop(contextD, false),
-          child: Text(L10n.current.cancel),
+        context: contextD,
+        builder: (contextD) => CustomDialog(
+          title: Text(
+            Platform.isIOS
+                ? L10n.current.iosRemindTitle
+                : L10n.current.androidRemindTitle,
+          ),
+          content: Text(
+            Platform.isIOS
+                ? L10n.current.iosRemindContent
+                : L10n.current.androidRemindContent,
+          ),
+          actions: [
+            if (Platform.isIOS)
+              TextButton(
+                onPressed: () => Navigator.pop(contextD, false),
+                child: Text(L10n.current.cancel),
+              ),
+            TextButton(
+              onPressed: () => Navigator.pop(contextD, true),
+              child: Text(L10n.current.ok),
+            ),
+            TextButton(
+              onPressed: () {
+                Shared.doNotRemindAgain = true;
+                Navigator.pop(contextD, true);
+              },
+              child: Text(L10n.current.doNotRemindAgain),
+            ),
+          ],
         ),
-        TextButton(
-          onPressed: () => Navigator.pop(contextD, true),
-          child: Text(L10n.current.ok),
-        ),
-        TextButton(
-          onPressed: () {
-            Shared.doNotRemindAgain = true;
-            Navigator.pop(contextD, true);
-          },
-          child: Text(L10n.current.doNotRemindAgain),
-        ),
-      ],
-    ),
-  );
+      );
 
+  void update() {
+    if (_renaming) {
+      // An already pending rule import/load may finish after the UI is locked.
+      // Reject an uncommitted plan, or refresh once the active commit finishes.
+      _deferredUpdate = true;
+      return;
+    }
+    _invalidateNewNames();
+    setState(() {});
+  }
 
-  void update() => setState(() {});
+  void _invalidateNewNames() {
+    _newNameGeneration++;
+    _newNameFutures.clear();
+    _newNamesReady = null;
+    _collisionErrors.clear();
+    _collisionCheckRevision++;
+    for (final file in _files) {
+      file.newName = null;
+      file.error = null;
+    }
+  }
 
-  Future<void> getNewName(FileSystemEntity file, FileMetadata metadata) async {
-    if (file == _files.first) {
+  Future<void> _newNameFuture(FileEntity file) {
+    final generation = _newNameGeneration;
+    if (!_files.contains(file)) {
+      return getNewName(file, generation: generation);
+    }
+
+    if (_files.any((entry) => !_newNameFutures.containsKey(entry))) {
+      // A target occupied by another source is safe only once that source's
+      // final name is known. Generate the whole batch before checking it.
+      _collisionCheckRevision++;
+      final files = List<FileEntity>.of(_files);
+      Future<void> preceding = Future.value();
+      for (final entry in files) {
+        final previous = preceding;
+        preceding = _newNameFutures.putIfAbsent(entry, () {
+          Future<void> generate() => getNewName(entry, generation: generation);
+          if (widget.dependsOnFileOrder()) {
+            return previous.then((_) => generate());
+          }
+          return widget.requiresMetadata()
+              ? _metadataQueue.run(generate)
+              : generate();
+        });
+      }
+
+      late final Future<void> ready;
+      ready = Future.wait(files.map((entry) => _newNameFutures[entry]!))
+          .then((_) async {
+        if (identical(_newNamesReady, ready)) {
+          await _validateNewNameCollisions(generation);
+        }
+      });
+      _newNamesReady = ready;
+    }
+    return _newNamesReady!;
+  }
+
+  Future<void> getNewName(
+    FileEntity file, {
+    int? generation,
+  }) async {
+    final requestedGeneration = generation ?? _newNameGeneration;
+    if (_files.isNotEmpty && identical(file, _files.first)) {
       widget.resetRules.call();
     }
 
+    if (requestedGeneration != _newNameGeneration) return;
+
+    var filename = file.name;
     try {
-      file.newName = await widget.getNewName(file.name, metadata);
-      if (file.newName != file.name && ((await File(file.newPath).exists()) || file.newNameDuplicate)) {
-        file.error = L10n.current.fileAlreadyExists;
-        return;
+      if (Platform.isAndroid && file.path.startsWith('content://')) {
+        await file.initMetadata();
+        if (requestedGeneration != _newNameGeneration) return;
+        filename = file.metadata!.androidRealName;
       }
+      final newName = _mapping != null
+          ? (_mapping![file] ?? filename)
+          : replaceSpecialCharacters(
+              await widget.getNewName(filename, file.metadataForRename),
+            );
+
+      if (requestedGeneration != _newNameGeneration) return;
+
+      file.newName = newName;
+      _collisionErrors.remove(file);
     } catch (e, s) {
       debugPrintStack(stackTrace: s);
-      file.newName = file.name;
+      if (requestedGeneration != _newNameGeneration) return;
+      file.newName = filename;
+      _collisionErrors.remove(file);
       file.error = e.toString();
       return;
     }
@@ -152,35 +475,120 @@ class FilesPageState extends State<FilesPage> {
     file.error = null;
   }
 
-  List<FileSystemEntity> _filteredList() {
+  Future<void> _validateNewNameCollisions(int generation) async {
+    if (!mounted || generation != _newNameGeneration || _renaming) return;
+    await _buildRenamePlan(_renameTargets(), generation: generation);
+
+    if (mounted && generation == _newNameGeneration) {
+      setState(() {});
+    }
+  }
+
+  List<FileEntity> _filteredList() {
     return _files
         .where(
           (element) =>
-              element.name.toString().toLowerCase().contains(_filter.toLowerCase()) &&
+              element.name
+                  .toString()
+                  .toLowerCase()
+                  .contains(_filter.toLowerCase()) &&
               Shared.fileOrDir.contains(element.fileOrDir()),
         )
         .toList();
   }
 
-  TableCell _rowTextCell(FileSystemEntity file, {bool isNew = false}) {
-    if (!file.existsSync()) {
+  Future<void> _sortFiles(FileSortField field) async {
+    if (_renaming) return;
+    final generation = ++_sortGeneration;
+    late final bool ascending;
+    setState(() {
+      if (_sortField == field) {
+        _sortAscending = !_sortAscending;
+      } else {
+        _sortField = field;
+        _sortAscending = true;
+      }
+      ascending = _sortAscending;
+    });
+
+    if (field == FileSortField.size || field == FileSortField.date) {
+      await preloadFileSortMetadata(List<FileEntity>.of(_files));
+    }
+
+    if (!mounted || _renaming || generation != _sortGeneration) return;
+
+    setState(() {
+      _invalidateNewNamesForOrderChange();
+      sortFiles(_files, field, ascending: ascending);
+    });
+  }
+
+  void _reorderFiles(int oldIndex, int newIndex) {
+    if (_renaming) return;
+    final visibleFiles = _filteredList();
+    final movedFile = visibleFiles.removeAt(oldIndex);
+
+    setState(() {
+      _invalidateNewNamesForOrderChange();
+      _files.remove(movedFile);
+      if (newIndex == visibleFiles.length) {
+        final lastVisibleFile = visibleFiles.lastOrNull;
+        if (lastVisibleFile == null) {
+          _files.add(movedFile);
+        } else {
+          _files.insert(_files.indexOf(lastVisibleFile) + 1, movedFile);
+        }
+      } else {
+        _files.insert(_files.indexOf(visibleFiles[newIndex]), movedFile);
+      }
+    });
+  }
+
+  void _invalidateNewNamesForOrderChange() {
+    if (widget.dependsOnFileOrder()) {
+      _invalidateNewNames();
+    }
+  }
+
+  TableCell _rowTextCell(FileEntity file, {bool isNew = false}) {
+    if (!(Platform.isAndroid && file.path.startsWith('content://')) &&
+        !file.existsSync()) {
       return TableCell(
         child: getRowText(L10n.current.fileNotExist, null),
       );
     }
 
-    return TableCell(
-      child: isNew ? FutureBuilder(
-        future: getNewName(file, FileMetadata(file)),
+    late final Widget content;
+
+    if (isNew) {
+      content = FutureBuilder(
+        future: _newNameFuture(file),
         builder: (context, snap) {
           if ((snap.connectionState == ConnectionState.active ||
-              snap.connectionState == ConnectionState.done) &&
+                  snap.connectionState == ConnectionState.done) &&
               (!snap.hasError)) {
             return getRowText(file.newName, file.error);
           }
           return const LinearProgressIndicator();
         },
-      ) : getRowText(file.name, null),
+      );
+    } else if (Platform.isAndroid && file.path.startsWith('content://')) {
+      content = FutureBuilder(
+        future: file.initMetadata(),
+        builder: (context, snap) {
+          if ((snap.connectionState == ConnectionState.active ||
+                  snap.connectionState == ConnectionState.done) &&
+              (!snap.hasError)) {
+            return getRowText(file.metadata!.androidRealName, file.error);
+          }
+          return const LinearProgressIndicator();
+        },
+      );
+    } else {
+      content = getRowText(file.name, null);
+    }
+    return TableCell(
+      child: content,
     );
   }
 
@@ -206,44 +614,60 @@ class FilesPageState extends State<FilesPage> {
     );
   }
 
-  List<TableRow> _tableRows() {
-    final filteredList = _filteredList();
+  TableRow _tableRow(FileEntity file, int index) {
     final fileListColors = Theme.of(context).extension<FileListColors>()!;
-    return List.generate(
-      filteredList.length,
-      (index) => TableRow(
-        decoration: BoxDecoration(
-          color: index % 2 == 0 ? fileListColors.primaryColor : fileListColors.secondaryColor,
-        ),
-        children: [
-          TableCell(
-            child: Checkbox(
-              value: filteredList[index].selected,
-              onChanged: (val) {
-                if (val != null) {
-                  setState(() {
-                    filteredList[index].selected = val;
-                  });
-                }
-              },
-            ),
-          ),
-          _rowTextCell(filteredList[index]),
-          _rowTextCell(filteredList[index], isNew: true),
-          TableCell(
-            child: IconButton(
-              onPressed: () {
-                setState(() {
-                  _files.removeWhere(
-                    (element) => element.path == filteredList[index].path,
-                  );
-                });
-              },
-              icon: const Icon(Icons.clear),
-            ),
-          ),
-        ],
+    return TableRow(
+      decoration: BoxDecoration(
+        color: index % 2 == 0
+            ? fileListColors.primaryColor
+            : fileListColors.secondaryColor,
       ),
+      children: [
+        TableCell(
+          child: ReorderableDragStartListener(
+            index: index,
+            child: const Icon(Icons.drag_handle),
+          ),
+        ),
+        TableCell(
+          child: Checkbox(
+            value: file.selected,
+            onChanged: (val) {
+              if (_renaming) return;
+              if (val != null && val != file.selected) {
+                setState(() {
+                  file.selected = val;
+                  if (_scope == RenameScope.selected) _invalidateNewNames();
+                });
+                unawaited(AppHaptics.selectionChanged());
+              }
+            },
+          ),
+        ),
+        if (widget.showThumbnails)
+          TableCell(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: FileThumbnail(key: ValueKey(file.path), file: file),
+            ),
+          ),
+        _rowTextCell(file),
+        _rowTextCell(file, isNew: true),
+        TableCell(
+          child: IconButton(
+            onPressed: () {
+              if (_renaming) return;
+              setState(() {
+                _invalidateNewNames();
+                _mapping?.remove(file);
+                _files.remove(file);
+              });
+              unawaited(_releaseUnusedIOSAccess());
+            },
+            icon: const Icon(Icons.delete),
+          ),
+        ),
+      ],
     );
   }
 
@@ -253,27 +677,38 @@ class FilesPageState extends State<FilesPage> {
             color: Theme.of(context).scaffoldBackgroundColor,
           ),
           children: [
+            const TableCell(child: SizedBox()),
             TableCell(
               child: Tooltip(
-                message: _files.isNotEmpty && _files.every((element) => element.selected)
+                message: _filteredList().isNotEmpty &&
+                        _filteredList().every((element) => element.selected)
                     ? L10n.current.cancelAll
                     : L10n.current.selectAll,
                 child: Checkbox(
-                  value: _files.isNotEmpty && _files.every((element) => element.selected),
+                  value: _filteredList().isNotEmpty &&
+                      _filteredList().every((element) => element.selected),
                   onChanged: (_) {
+                    final visible = _filteredList();
+                    if (_renaming || visible.isEmpty) return;
                     setState(() {
-                      if (_files.every((element) => element.selected)) {
-                        ExFile.clearSelections();
-                      } else {
-                        for (var element in _files) {
-                          element.selected = true;
-                        }
+                      final select = !visible.every((file) => file.selected);
+                      for (final file in visible) {
+                        file.selected = select;
                       }
+                      if (_scope == RenameScope.selected) _invalidateNewNames();
                     });
+                    unawaited(AppHaptics.selectionChanged());
                   },
                 ),
               ),
             ),
+            if (widget.showThumbnails)
+              TableCell(
+                child: Tooltip(
+                  message: L10n.current.showThumbnails,
+                  child: const Icon(Icons.image_outlined),
+                ),
+              ),
             TableCell(
               child: Center(
                 child: Text(L10n.current.currentName),
@@ -289,11 +724,15 @@ class FilesPageState extends State<FilesPage> {
                 message: L10n.current.removeAll,
                 child: IconButton(
                   onPressed: () {
+                    if (_renaming) return;
                     setState(() {
+                      _invalidateNewNames();
                       _files.clear();
+                      _mapping = null;
                     });
+                    unawaited(_releaseUnusedIOSAccess());
                   },
-                  icon: const Icon(Icons.clear),
+                  icon: const Icon(Icons.delete),
                 ),
               ),
             ),
@@ -301,12 +740,15 @@ class FilesPageState extends State<FilesPage> {
         ),
       ];
 
-  Widget _table(List<TableRow> children) => Table(
-        columnWidths: const <int, TableColumnWidth>{
-          0: IntrinsicColumnWidth(),
-          1: FlexColumnWidth(1.2),
-          2: FlexColumnWidth(1.5),
-          3: IntrinsicColumnWidth(),
+  Widget _table(List<TableRow> children, {Key? key}) => Table(
+        key: key,
+        columnWidths: <int, TableColumnWidth>{
+          0: const IntrinsicColumnWidth(),
+          1: const IntrinsicColumnWidth(),
+          if (widget.showThumbnails) 2: const FixedColumnWidth(56),
+          widget.showThumbnails ? 3 : 2: const FlexColumnWidth(1.2),
+          widget.showThumbnails ? 4 : 3: const FlexColumnWidth(1.5),
+          widget.showThumbnails ? 5 : 4: const IntrinsicColumnWidth(),
         },
         defaultVerticalAlignment: TableCellVerticalAlignment.middle,
         border: TableBorder.all(width: 24, color: Colors.transparent),
@@ -314,7 +756,30 @@ class FilesPageState extends State<FilesPage> {
       );
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ExcludeFocus(
+        excluding: _renaming,
+        child: AbsorbPointer(
+          absorbing: _renaming,
+          child: _buildContent(context),
+        ),
+      );
+
+  Widget _buildContent(BuildContext context) {
+    final filteredFiles = _filteredList();
+    final targets = _renameTargets();
+    final visibleSet = filteredFiles.toSet();
+    final hiddenCount =
+        targets.where((file) => !visibleSet.contains(file)).length;
+    final targetCount = targets.length;
+    if (_reportedTargetCount != targetCount) {
+      _reportedTargetCount = targetCount;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _reportedTargetCount == targetCount) {
+          widget.onTargetCountChanged?.call(targetCount);
+        }
+      });
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
@@ -325,8 +790,10 @@ class FilesPageState extends State<FilesPage> {
               CustomDrop<String>(
                 value: Shared.fileOrDir,
                 onChanged: (String? newValue) {
+                  if (_renaming) return;
                   setState(() {
                     Shared.fileOrDir = newValue!;
+                    _invalidateNewNames();
                   });
                 },
                 items: const <String>['Files', 'Directories', 'Files & Dirs'],
@@ -343,38 +810,132 @@ class FilesPageState extends State<FilesPage> {
                     hintText: L10n.current.filter,
                   ),
                   onChanged: (val) {
+                    if (_renaming) return;
                     setState(() {
                       _filter = val;
+                      _invalidateNewNames();
                     });
                   },
                 ),
               ),
               box,
-              ElevatedButton(
+              PopupMenuButton<FileSortField>(
+                icon: const Icon(Icons.sort_by_alpha),
+                tooltip: L10n.current.fileManagerSortButton,
+                onSelected: _sortFiles,
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: FileSortField.name,
+                    child: Text(L10n.current.fileSortName),
+                  ),
+                  PopupMenuItem(
+                    value: FileSortField.size,
+                    child: Text(L10n.current.fileSortSize),
+                  ),
+                  PopupMenuItem(
+                    value: FileSortField.date,
+                    child: Text(L10n.current.fileSortDate),
+                  ),
+                  PopupMenuItem(
+                    value: FileSortField.type,
+                    child: Text(L10n.current.fileSortType),
+                  ),
+                ],
+              ),
+              IconButton(
+                onPressed: () => _sortFiles(_sortField ?? FileSortField.name),
+                icon: Icon(
+                  _sortAscending ? Icons.arrow_upward : Icons.arrow_downward,
+                ),
+                tooltip: L10n.current.fileManagerSortButton,
+              ),
+              IconButton(
                 onPressed: addFileFromPicker,
-                child: Text(L10n.current.addFile),
+                icon: const Icon(Icons.add),
+                tooltip: L10n.current.addFile,
               ),
             ],
           ),
         ),
-        const SizedBox(height: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<RenameScope>(
+                      key: const ValueKey('renameScope'),
+                      initialValue: _scope,
+                      isExpanded: true,
+                      decoration:
+                          InputDecoration(labelText: L10n.current.renameScope),
+                      items: [
+                        DropdownMenuItem(
+                          value: RenameScope.visible,
+                          child: Text(L10n.current.scopeVisible),
+                        ),
+                        DropdownMenuItem(
+                          value: RenameScope.all,
+                          child: Text(L10n.current.scopeAll),
+                        ),
+                        DropdownMenuItem(
+                          value: RenameScope.selected,
+                          child: Text(L10n.current.scopeSelected),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) setRenameScope(value);
+                      },
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    tooltip:
+                        '${L10n.current.mappingMenu}: ${L10n.current.mappingHint}',
+                    icon: const Icon(Icons.table_chart_outlined),
+                    onSelected: (action) {
+                      if (action == 'import') _importMappingFile();
+                      if (action == 'export') _exportMappingFile();
+                    },
+                    itemBuilder: (_) => [
+                      PopupMenuItem(
+                        value: 'import',
+                        child: Text(L10n.current.importMapping),
+                      ),
+                      PopupMenuItem(
+                        value: 'export',
+                        child: Text(L10n.current.exportMapping),
+                      ),
+                    ],
+                  ),
+                  if (_mapping != null)
+                    IconButton(
+                      tooltip: L10n.current.clearMapping,
+                      icon: const Icon(Icons.close),
+                      onPressed: () {
+                        if (_renaming) return;
+                        setState(() {
+                          _mapping = null;
+                          _invalidateNewNames();
+                        });
+                      },
+                    ),
+                ],
+              ),
+              Text(L10n.current.renameTargetSummary(targetCount, hiddenCount)),
+              if (_mapping != null) Text(L10n.current.mappingActive),
+            ],
+          ),
+        ),
         _table(_headerRow()),
         Expanded(
           child: DropTarget(
-            enable: !Platform.isIOS,
+            enable: !_renaming && !(Platform.isIOS || Platform.isAndroid),
             onDragDone: (detail) async {
+              if (_renaming) return;
               for (var xFile in detail.files) {
-                late final FileSystemEntity file;
-                if (Platform.isAndroid && xFile.path.startsWith('content://')) {
-                  try {
-                    file = (await PlatformFilePicker.getRealPathFromURI(xFile.path)).toFileSystemEntity();
-                  } catch (e) {
-                    Fluttertoast.showToast(msg: L10n.current.dragNotSupported);
-                    return;
-                  }
-                } else {
-                  file = xFile.toFileSystemEntity();
-                }
+                final FileEntity file = xFile.toFileEntity();
 
                 if (_files.every((exist) => file.path != exist.path)) {
                   setState(() {
@@ -388,6 +949,7 @@ class FilesPageState extends State<FilesPage> {
               });
             },
             onDragEntered: (detail) {
+              if (_renaming) return;
               setState(() {
                 _dragging = true;
               });
@@ -399,20 +961,44 @@ class FilesPageState extends State<FilesPage> {
             },
             onDragUpdated: (detail) {},
             child: Container(
-              color: Theme.of(context).extension<FileListColors>()!.primaryColor,
+              color:
+                  Theme.of(context).extension<FileListColors>()!.primaryColor,
               child: Stack(
                 children: [
                   if (_files.isNotEmpty)
-                    SingleChildScrollView(
-                      child: _table(_tableRows()),
+                    ReorderableListView.builder(
+                      buildDefaultDragHandles: false,
+                      onReorderStart: (_) {
+                        if (!_renaming) unawaited(AppHaptics.dragStarted());
+                      },
+                      onReorderItem: _reorderFiles,
+                      itemCount: filteredFiles.length,
+                      itemBuilder: (context, index) {
+                        final file = filteredFiles[index];
+                        return _table(
+                          [
+                            _tableRow(file, index),
+                          ],
+                          key: ValueKey(file),
+                        );
+                      },
                     )
                   else if (!_dragging)
-                    Center(
-                      child: Text(Platform.isIOS ? L10n.current.addFiles : L10n.current.dragToAdd),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Center(
+                        child: Text(
+                          Platform.isIOS
+                              ? L10n.current.addFiles
+                              : (Platform.isAndroid
+                                  ? L10n.current.addFilesAndroid
+                                  : L10n.current.dragToAdd),
+                        ),
+                      ),
                     ),
                   if (_dragging)
                     Container(
-                      color: Colors.blue.withOpacity(0.2),
+                      color: Colors.blue.withValues(alpha: 0.2),
                       child: Center(
                         child: Text(L10n.current.dropToAdd),
                       ),
@@ -428,45 +1014,262 @@ class FilesPageState extends State<FilesPage> {
 
   Future<void> renameFiles({
     bool remove = true,
-    bool onlySelected = false,
+    bool? onlySelected,
   }) async {
-    final List<Future> futures = [];
-    bool noError = true;
-    _files.asMap().forEach((index, file) {
-      // if file is selected or onlySelected = false (all files should be renamed)
-      if (file.selected || !onlySelected) {
-        futures.add(
-          rename(
-            file,
-            context: context,
-          ).then((value) {
-            if (value == null) {
-              noError = false;
-              setState(() {
-                file.error = L10n.current.renameFailed;
-              });
-            } else if (remove) {
-              setState(() {
-                _files.remove(file);
-              });
+    if (_renaming || !mounted) return;
+    // Discard a metadata sort that started before this operation, even if its
+    // result arrives after the rename has finished.
+    _sortGeneration++;
+    _setRenaming(true);
 
-              if (Platform.isIOS && !_files.any((e) => e.parent.path == file.parent.path)) {
-                PlatformFilePicker.changeScopedAccess(file.parent.path, false);
-              }
-            } else {
-              setState(() {
-                _files[index] = value;
-              });
-            }
-          }),
-        );
+    try {
+      // Snapshot the explicit scope before awaiting preview or permission work.
+      // The optional override is retained for existing programmatic callers.
+      final requestedFiles = onlySelected == null
+          ? _renameTargets()
+          : _files
+              .where(
+                (file) =>
+                    (file.selected || !onlySelected) &&
+                    (_mapping == null || _mapping!.containsKey(file)),
+              )
+              .toList();
+      if (requestedFiles.isEmpty) return;
+      for (final file in requestedFiles) {
+        await _newNameFuture(file);
+      }
+      if (!mounted || _deferredUpdate) return;
+      final filesToRename = await _buildRenamePlan(requestedFiles);
+      var noError = filesToRename.length == requestedFiles.length;
+
+      if (!mounted || _deferredUpdate) return;
+      setState(() {});
+      if (!noError) {
+        unawaited(AppHaptics.error());
+        return;
+      }
+
+      final mediaUris = <String>[];
+      // Snapshot whether this batch changes any names before the transaction
+      // mutates entities. Empty/unchanged batches must not signal success.
+      var hasNameChanges = false;
+      for (final file in filesToRename) {
+        if (Platform.isAndroid && file.path.startsWith('content://')) {
+          await file.initMetadata();
+          if (file.metadata!.androidRealName != file.newName) {
+            mediaUris.add(file.path);
+            hasNameChanges = true;
+          }
+        } else if (file.name != file.newName) {
+          hasNameChanges = true;
+        }
+      }
+      final mediaPermission = Platform.isAndroid
+          ? await PlatformFilePicker.requestMediaWritePermission(mediaUris)
+          : const MediaWritePermission.empty();
+      if (!mounted || _deferredUpdate) return;
+
+      final deniedFiles = filesToRename.where(
+        (file) =>
+            mediaPermission.candidates.contains(file.path) &&
+            !mediaPermission.approved.contains(file.path),
+      );
+      if (deniedFiles.isNotEmpty) {
+        noError = false;
+        setState(() {
+          for (final file in deniedFiles) {
+            file.error = L10n.current.renameFailed;
+          }
+        });
+        return;
+      }
+
+      final result = await commitRenameTransaction(
+        filesToRename,
+        context: context,
+      );
+      noError = noError && result.succeeded;
+      if (!mounted) return;
+
+      setState(() {
+        final participants = filesToRename.toSet();
+        for (var index = 0; index < _files.length; index++) {
+          if (!participants.contains(_files[index])) {
+            final original = _files[index];
+            _files[index] = result.relocateDescendant(original);
+            _transferMapping(original, _files[index]);
+          }
+        }
+        for (var index = 0; index < filesToRename.length; index++) {
+          final original = filesToRename[index];
+          final listIndex = _files.indexOf(original);
+          if (listIndex < 0) continue;
+          if (result.succeeded) {
+            _mapping?.remove(original);
+          } else {
+            _transferMapping(original, result.entities[index]);
+          }
+          if (result.succeeded && remove) {
+            _files.removeAt(listIndex);
+          } else {
+            _files[listIndex] = result.entities[index];
+          }
+        }
+        _invalidateNewNames();
+        if (!result.succeeded) {
+          for (final file in result.entities) {
+            file.error = L10n.current.renameFailed;
+          }
+        }
+      });
+
+      if (noError && remove && _mapping == null) {
+        widget.clearRules.call();
+      }
+      // The transaction has finished, including rollback on failure. Emit at
+      // most one result for the batch, never once per file or at button press.
+      if (!result.succeeded) {
+        unawaited(AppHaptics.error());
+      } else if (hasNameChanges) {
+        unawaited(AppHaptics.success());
+      }
+    } finally {
+      if (_deferredUpdate) {
+        _deferredUpdate = false;
+        _invalidateNewNames();
+      }
+      _setRenaming(false);
+      await _releaseUnusedIOSAccess();
+    }
+  }
+
+  void _setRenaming(bool value) {
+    _renaming = value;
+    _dragging = false;
+    if (mounted) setState(() {});
+    if (mounted) widget.onRenamingChanged?.call(value);
+  }
+
+  Future<List<FileEntity>> _buildRenamePlan(
+    List<FileEntity> requestedFiles, {
+    int? generation,
+  }) async {
+    final requestedGeneration = generation ?? _newNameGeneration;
+    final revision = ++_collisionCheckRevision;
+    final localFiles = <FileEntity>[];
+    final safFiles = <FileEntity>[];
+    for (final file in requestedFiles) {
+      file.newName = replaceSpecialCharacters(file.newName);
+      // Recheck collision errors for this batch: the selected subset or disk
+      // contents may have changed since preview. Preserve generation errors.
+      if (file.error != null && !_collisionErrors.contains(file)) continue;
+      if (Platform.isAndroid && file.path.startsWith('content://')) {
+        safFiles.add(file);
+      } else {
+        localFiles.add(file);
+      }
+    }
+
+    // Snapshot paths before asynchronous filesystem checks. Only publish the
+    // result if both the names and this validation request are still current.
+    final sources = {for (final file in localFiles) file: _sourcePathKey(file)};
+    final targets = {for (final file in localFiles) file: _targetPathKey(file)};
+    final paths = {for (final file in localFiles) file: file.newPath};
+    final collisions = <FileEntity>{};
+    final targetGroups = <String, List<FileEntity>>{};
+    for (final file in localFiles) {
+      targetGroups.putIfAbsent(targets[file]!, () => []).add(file);
+    }
+    for (final group in targetGroups.values) {
+      if (group.length > 1) {
+        collisions.addAll(group);
+      }
+    }
+
+    // Repeat this check after every newly blocked move. A destination can only
+    // be considered free when its selected source will actually move away.
+    var foundBlockedMove = true;
+    while (foundBlockedMove) {
+      foundBlockedMove = false;
+      final plannedMoves = localFiles
+          .where(
+            (file) =>
+                !collisions.contains(file) && sources[file] != targets[file],
+          )
+          .toList();
+      final movingSources = plannedMoves.map((file) => sources[file]).toSet();
+      for (final file in plannedMoves) {
+        final target = targets[file];
+        if (!movingSources.contains(target) &&
+            await FileSystemEntity.type(
+                  paths[file]!,
+                  followLinks: false,
+                ) !=
+                FileSystemEntityType.notFound) {
+          collisions.add(file);
+          foundBlockedMove = true;
+        }
+      }
+    }
+
+    if (requestedGeneration != _newNameGeneration ||
+        revision != _collisionCheckRevision) {
+      return [];
+    }
+    for (final file in requestedFiles) {
+      if (_collisionErrors.remove(file)) file.error = null;
+    }
+    for (final file in collisions) {
+      file.error = L10n.current.fileAlreadyExists;
+    }
+    _collisionErrors.addAll(collisions);
+    return [
+      ...localFiles.where((file) => !collisions.contains(file)),
+      ...safFiles,
+    ];
+  }
+
+  String _sourcePathKey(FileEntity file) => _normalisedPath(file.path);
+
+  String _targetPathKey(FileEntity file) => _normalisedPath(file.newPath);
+
+  String _normalisedPath(String path) {
+    final absolutePath = File(path).absolute.path;
+    return Platform.isWindows || Platform.isMacOS || Platform.isIOS
+        ? absolutePath.toLowerCase()
+        : absolutePath;
+  }
+}
+
+/// Limits expensive per-file metadata work while allowing independent rules to
+/// keep the UI responsive for large selections.
+class _BoundedTaskQueue {
+  _BoundedTaskQueue({required this.maxConcurrent});
+
+  final int maxConcurrent;
+  final List<void Function()> _pending = [];
+  int _active = 0;
+
+  Future<T> run<T>(Future<T> Function() task) {
+    final completer = Completer<T>();
+    _pending.add(() async {
+      try {
+        completer.complete(await task());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      } finally {
+        _active--;
+        _startNext();
       }
     });
+    _startNext();
+    return completer.future;
+  }
 
-    await Future.wait(futures);
-
-    if (noError && remove) {
-      widget.clearRules.call();
+  void _startNext() {
+    while (_active < maxConcurrent && _pending.isNotEmpty) {
+      _active++;
+      _pending.removeAt(0)();
     }
   }
 }

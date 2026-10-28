@@ -8,22 +8,38 @@ import '../entity/constants.dart';
 import '../entity/sharedpref.dart';
 import '../l10n/l10n.dart';
 import '../rules/rule.dart';
+import '../tools/app_haptics.dart';
 import '../tools/file_metadata.dart';
+import '../tools/logger.dart';
 import '../tools/responsive.dart';
 import '../widget/custom_dialog.dart';
 import 'rules_page.dart';
 import 'files_page.dart';
 
-class HomePage extends StatelessWidget {
-  HomePage({super.key});
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
   final GlobalKey<FilesPageState> filesKey = GlobalKey<FilesPageState>();
   final GlobalKey<RulesPageState> rulesKey = GlobalKey<RulesPageState>();
+  bool _renaming = false;
+  int _targetCount = 0;
 
   @override
   Widget build(BuildContext context) {
     final filesPage = FilesPage(
       key: filesKey,
+      onRenamingChanged: (value) {
+        if (mounted) setState(() => _renaming = value);
+      },
+      onTargetCountChanged: (count) {
+        if (mounted) setState(() => _targetCount = count);
+      },
+      showThumbnails: Shared.showThumbnails,
       getNewName: (String name, FileMetadata metadata) async {
         for (Rule rule in rulesKey.currentState?.rules ?? []) {
           name = await rule.newName(name, metadata: metadata);
@@ -37,36 +53,56 @@ class HomePage extends StatelessWidget {
           }
         }
       },
+      dependsOnFileOrder: () => (rulesKey.currentState?.rules ?? [])
+          .any((rule) => rule is RuleIncrement),
+      requiresMetadata: () => (rulesKey.currentState?.rules ?? [])
+          .any((rule) => rule.requiresMetadata),
       clearRules: () {
         rulesKey.currentState?.clearRule();
       },
     );
 
-    final rulesPage = RulesPage(
-      key: rulesKey,
-      onRuleChanged: () {
-        filesKey.currentState?.update();
-      },
+    final rulesPage = _lockWhileRenaming(
+      RulesPage(
+        key: rulesKey,
+        onRuleChanged: () {
+          filesKey.currentState?.update();
+        },
+      ),
     );
 
     return Scaffold(
-      bottomNavigationBar: HomeToolBar(
-        onlySelectedCallback: (value) => Shared.onlySelected = value,
-        onlySelectedValue: () => Shared.onlySelected,
-        removeRenamedCallback: (value) => Shared.removeRenamed = value,
-        removeRenamedValue: () => Shared.removeRenamed,
-        removeRulesCallback: (value) => Shared.removeRules = value,
-        removeRulesValue: () => Shared.removeRules,
+      bottomNavigationBar: _lockWhileRenaming(
+        HomeToolBar(
+          hapticFeedbackCallback: (value) => Shared.hapticFeedback = value,
+          hapticFeedbackValue: () => Shared.hapticFeedback,
+          showThumbnailsCallback: (value) => setState(() {
+            Shared.showThumbnails = value;
+          }),
+          showThumbnailsValue: () => Shared.showThumbnails,
+          removeRenamedCallback: (value) => Shared.removeRenamed = value,
+          removeRenamedValue: () => Shared.removeRenamed,
+          removeRulesCallback: (value) => Shared.removeRules = value,
+          removeRulesValue: () => Shared.removeRules,
+        ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          filesKey.currentState?.renameFiles(
-            remove: Shared.removeRenamed,
-            onlySelected: Shared.onlySelected,
-          );
-        },
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _renaming || _targetCount == 0
+            ? null
+            : () {
+                filesKey.currentState?.renameFiles(
+                  remove: Shared.removeRenamed,
+                );
+              },
         tooltip: L10n.current.rename,
-        child: const Icon(Icons.play_arrow_rounded),
+        label: Text(L10n.current.renameCount(_targetCount)),
+        icon: _renaming
+            ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.play_arrow_rounded),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.endDocked,
       body: SafeArea(
@@ -97,21 +133,31 @@ class HomePage extends StatelessWidget {
       ),
     );
   }
+
+  Widget _lockWhileRenaming(Widget child) => ExcludeFocus(
+        excluding: _renaming,
+        child: AbsorbPointer(absorbing: _renaming, child: child),
+      );
 }
 
 class HomeToolBar extends StatefulWidget {
   const HomeToolBar({
     super.key,
-    required this.onlySelectedCallback,
-    required this.onlySelectedValue,
+    required this.hapticFeedbackCallback,
+    required this.hapticFeedbackValue,
+    required this.showThumbnailsCallback,
+    required this.showThumbnailsValue,
     required this.removeRenamedCallback,
     required this.removeRenamedValue,
     required this.removeRulesCallback,
     required this.removeRulesValue,
   });
 
-  final void Function(bool) onlySelectedCallback;
-  final bool Function() onlySelectedValue;
+  final void Function(bool) hapticFeedbackCallback;
+  final bool Function() hapticFeedbackValue;
+
+  final void Function(bool) showThumbnailsCallback;
+  final bool Function() showThumbnailsValue;
 
   final void Function(bool) removeRenamedCallback;
   final bool Function() removeRenamedValue;
@@ -152,6 +198,15 @@ class _HomeToolBarState extends State<HomeToolBar> {
 
   List<IconButton> _iconButtons() => [
         IconButton(
+          tooltip: L10n.current.showThumbnails,
+          isSelected: widget.showThumbnailsValue(),
+          icon: const Icon(Icons.image_outlined),
+          selectedIcon: const Icon(Icons.image),
+          onPressed: () => setState(() {
+            widget.showThumbnailsCallback(!widget.showThumbnailsValue());
+          }),
+        ),
+        IconButton(
           tooltip: L10n.current.appInfo,
           icon: const Icon(Icons.info_rounded),
           onPressed: () async {
@@ -178,7 +233,11 @@ class _HomeToolBarState extends State<HomeToolBar> {
                     style: TextStyle(color: Colors.blue),
                   ),
                   onTap: () {
-                    launchUrl(Uri.parse('https://github.com/sun-jiao/renamer/issues/new'));
+                    launchUrl(
+                      Uri.parse(
+                        'https://github.com/sun-jiao/renamer/issues/new',
+                      ),
+                    );
                   },
                 ),
               ],
@@ -191,6 +250,49 @@ class _HomeToolBarState extends State<HomeToolBar> {
           onPressed: ratingMyApp,
         ),
         IconButton(
+          tooltip: L10n.current.viewLog,
+          icon: const Icon(Icons.history_rounded),
+          onPressed: () async {
+            final logs = await Logger().readLogs();
+            if (!mounted) return;
+            showDialog(
+              context: context,
+              builder: (context) => CustomDialog(
+                title: Text(L10n.current.viewLog),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: SelectionArea(
+                    child: SingleChildScrollView(
+                      child: Text(
+                        logs.isEmpty ? L10n.current.logEmpty : logs,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                actions: [
+                  IconButton(
+                    tooltip:
+                        MaterialLocalizations.of(context).deleteButtonTooltip,
+                    onPressed: () async {
+                      await Logger().clearLogs();
+                      if (context.mounted) Navigator.pop(context);
+                    },
+                    icon: const Icon(Icons.delete_outline_rounded),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: Text(L10n.current.ok),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+        IconButton(
           tooltip: L10n.current.sourceCode,
           icon: const Icon(Icons.code_rounded),
           onPressed: gotoGithub,
@@ -198,27 +300,23 @@ class _HomeToolBarState extends State<HomeToolBar> {
       ];
 
   IconButton _expandIndicator() => IconButton(
-        tooltip: expanded ? L10n.current.collapseOptions : L10n.current.expandOptions,
+        tooltip: expanded
+            ? L10n.current.collapseOptions
+            : L10n.current.expandOptions,
         onPressed: () {
           setState(() {
             expanded = !expanded;
           });
         },
         icon: Icon(
-          expanded ? Icons.arrow_back_ios_new_rounded : Icons.arrow_forward_ios_rounded,
+          expanded
+              ? Icons.arrow_back_ios_new_rounded
+              : Icons.arrow_forward_ios_rounded,
           size: 20,
         ),
       );
 
   List<Widget> _chips() => [
-        box,
-        FilterChip(
-          label: Text(L10n.current.onlySelected),
-          onSelected: (value) => setState(() {
-            widget.onlySelectedCallback.call(value);
-          }),
-          selected: widget.onlySelectedValue.call(),
-        ),
         box,
         FilterChip(
           label: Text(L10n.current.removeRenamed),
@@ -235,6 +333,16 @@ class _HomeToolBarState extends State<HomeToolBar> {
           }),
           selected: widget.removeRulesValue.call(),
         ),
+        if (AppHaptics.supported) ...[
+          box,
+          FilterChip(
+            label: Text(L10n.current.hapticFeedback),
+            selected: widget.hapticFeedbackValue(),
+            onSelected: (value) => setState(() {
+              widget.hapticFeedbackCallback(value);
+            }),
+          ),
+        ],
       ];
 
   void ratingMyApp() => showDialog(

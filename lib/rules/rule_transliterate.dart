@@ -1,6 +1,17 @@
 part of 'rule.dart';
 
 class RuleTransliterate implements Rule {
+  static const Set<String> validLangCodes = {
+    'bg',
+    'me',
+    'mk',
+    'mn',
+    'ru',
+    'sr',
+    'tj',
+    'ua',
+  };
+
   RuleTransliterate(
     this.type, {
     String? langCode,
@@ -10,6 +21,9 @@ class RuleTransliterate implements Rule {
 
   final Transliterate type;
   late final String langCode;
+
+  @override
+  bool get requiresMetadata => false;
 
   @override
   String newName(String oldName, {FileMetadata? metadata}) {
@@ -26,18 +40,23 @@ class RuleTransliterate implements Rule {
       case Transliterate.simplified:
         return ChineseHelper.convertToSimplifiedChinese(newName) + extension;
       case Transliterate.pinyin:
+        // The library trims a trailing separator with a rune count used as a
+        // UTF-16 offset. A separator absent from the input avoids trimming an
+        // original trailing underscore (and potentially part of an emoji).
+        var separator = '\u0000';
+        while (newName.contains(separator)) {
+          separator += '\u0000';
+        }
         return PinyinHelper.getPinyin(
               newName,
-              separator: '_',
+              separator: separator,
               format: PinyinFormat.WITH_TONE_MARK,
-            ) +
+            ).replaceAll(separator, '_') +
             extension;
       case Transliterate.cyrillic2Latin:
         return cyrtranslit.cyr2Lat(newName, langCode: langCode) + extension;
       case Transliterate.latin2Cyrillic:
         return cyrtranslit.lat2Cyr(newName, langCode: langCode) + extension;
-      default:
-        return oldName;
     }
   }
 
@@ -54,13 +73,35 @@ class RuleTransliterate implements Rule {
 
   @override
   String toString() {
-    if ([Transliterate.cyrillic2Latin, Transliterate.latin2Cyrillic].contains(type)) {
-      return L10n.current.transliterateToStringCyrillic(langCodeMap[langCode]!, type.toString());
+    if ([Transliterate.cyrillic2Latin, Transliterate.latin2Cyrillic]
+        .contains(type)) {
+      return L10n.current.transliterateToStringCyrillic(
+        langCodeMap[langCode]!,
+        type.toString(),
+      );
     } else {
       return L10n.current.transliterateToString(type.toString());
     }
   }
 
   @override
-  void openDialog(BuildContext context, Function(Rule rule) onSave) => showTransliterateDialog(context, onSave, this);
+  Map<String, dynamic> toMap() {
+    return {
+      'type': 'Transliterate',
+      'transliterateType': type.value,
+      'langCode': langCode,
+    };
+  }
+
+  factory RuleTransliterate.fromMap(Map<dynamic, dynamic> map) {
+    return RuleTransliterate(
+      Transliterate.values
+          .firstWhere((e) => e.value == map['transliterateType']),
+      langCode: map['langCode'] as String?,
+    );
+  }
+
+  @override
+  void openDialog(BuildContext context, Function(Rule rule) onSave) =>
+      showTransliterateDialog(context, onSave, this);
 }

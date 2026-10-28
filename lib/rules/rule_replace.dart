@@ -8,8 +8,9 @@ class RuleReplace implements Rule {
     this.withMetadata,
     this.caseSensitive,
     this.isRegex,
-    this.ignoreExtension,
-  );
+    this.ignoreExtension, {
+    this.dateFormat = FileMetadata.defaultDateFormat,
+  });
 
   final String targetString; // target to be matched and replaced.
   final String replacementString; // `targetString` will be replaced to this.
@@ -19,6 +20,13 @@ class RuleReplace implements Rule {
   final bool caseSensitive;
   final bool isRegex;
   final bool ignoreExtension;
+  final String dateFormat;
+
+  @override
+  bool get requiresMetadata =>
+      targetString.isNotEmpty &&
+      withMetadata &&
+      metadataTagRegex.hasMatch(replacementString);
 
   @override
   Future<String> newName(String oldName, {FileMetadata? metadata}) async {
@@ -35,43 +43,68 @@ class RuleReplace implements Rule {
 
     String replacementString = this.replacementString;
 
-    if (withMetadata) {
+    final randomStringRegex = RegExp(r'\{RandomString(?::(\d+))?\}');
+    if (randomStringRegex.hasMatch(replacementString)) {
+      replacementString = replacementString.replaceAllMapped(
+        randomStringRegex,
+        (match) {
+          final parsedLength = int.tryParse(match.group(1) ?? '') ?? 8;
+          final length = parsedLength.clamp(1, 32);
+          return Uuid().v4().replaceAll('-', '').substring(0, length);
+        },
+      );
+    }
+
+    if (requiresMetadata) {
       await metadata!.init();
-      replacementString = metadata.parse(replacementString);
+      replacementString = metadata.parse(
+        replacementString,
+        dateFormat: dateFormat,
+      );
     }
 
     Pattern target;
     String Function(Match) replacer;
 
     if (isRegex) {
-      target = RegExp(targetString, caseSensitive: caseSensitive);
+      target =
+          RegExp(targetString, caseSensitive: caseSensitive, unicode: true);
       replacer = (match) {
-        List<String?> groups =
-            match.groups(List<int>.generate(match.groupCount + 1, (index) => index));
-
-        String replacedString = replacementString;
-        for (int i = 0; i <= match.groupCount; i++) {
-          replacedString = replacedString.replaceAll('\\$i', groups[i] ?? '');
-        }
-
-        return replacedString;
+        return replacementString.replaceAllMapped(RegExp(r'\\(\d+)'), (
+          reference,
+        ) {
+          final index = int.tryParse(reference.group(1)!);
+          if (index == null || index > match.groupCount) return '';
+          return match.group(index) ?? '';
+        });
       };
     } else {
-      target = RegExp(RegExp.escape(targetString), caseSensitive: caseSensitive);
+      target = RegExp(
+        RegExp.escape(targetString),
+        caseSensitive: caseSensitive,
+        unicode: true,
+      );
       replacer = (match) => replacementString;
     }
 
-    if (replaceLimit == 0) {
-      newName = newName.replaceAllMapped(target, replacer);
-    } else if (replaceLimit > 0) {
-      for (int i = 0; i < replaceLimit; i++) {
-        newName = newName.replaceFirstMapped(target, replacer);
-      }
-    } else {
-      for (int i = 0; i > replaceLimit; i--) {
-        newName = newName.replaceLastMapped(target, replacer);
-      }
+    final matches = _wholeCharacterMatches(newName, target).toList();
+    final count = replaceLimit == 0
+        ? matches.length
+        : replaceLimit.abs().clamp(0, matches.length);
+    final selectedMatches = replaceLimit >= 0
+        ? matches.take(count)
+        : matches.skip(matches.length - count);
+
+    // Build from original match offsets so inserted text is never matched again.
+    final result = StringBuffer();
+    var start = 0;
+    for (final match in selectedMatches) {
+      result.write(newName.substring(start, match.start));
+      result.write(replacer(match));
+      start = match.end;
     }
+    result.write(newName.substring(start));
+    newName = result.toString();
 
     return newName + extension;
   }
@@ -82,5 +115,35 @@ class RuleReplace implements Rule {
   }
 
   @override
-  void openDialog(BuildContext context, Function(Rule rule) onSave) => showReplaceDialog(context, onSave, this);
+  Map<String, dynamic> toMap() {
+    return {
+      'type': 'Replace',
+      'targetString': targetString,
+      'replacementString': replacementString,
+      'replaceLimit': replaceLimit,
+      'withMetadata': withMetadata,
+      'caseSensitive': caseSensitive,
+      'isRegex': isRegex,
+      'ignoreExtension': ignoreExtension,
+      'dateFormat': dateFormat,
+    };
+  }
+
+  factory RuleReplace.fromMap(Map<dynamic, dynamic> map) {
+    return RuleReplace(
+      map['targetString'] as String,
+      map['replacementString'] as String,
+      map['replaceLimit'] as int,
+      map['withMetadata'] as bool,
+      map['caseSensitive'] as bool,
+      map['isRegex'] as bool,
+      map['ignoreExtension'] as bool,
+      dateFormat:
+          map['dateFormat'] as String? ?? FileMetadata.defaultDateFormat,
+    );
+  }
+
+  @override
+  void openDialog(BuildContext context, Function(Rule rule) onSave) =>
+      showReplaceDialog(context, onSave, this);
 }

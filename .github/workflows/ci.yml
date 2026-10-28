@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.47.2
+
+jobs:
+  analyze-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          architecture: x64
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - name: Install project dependencies
+        run: flutter pub get --enforce-lockfile
+      - name: Analyze
+        run: flutter analyze
+      - name: Test
+        run: flutter test
+      - name: Test CI simulator selection
+        run: node --test tool/boot_ios_simulator_test.cjs
+      - name: Test release metadata generation
+        run: python3 -m unittest discover -s packaging -p 'test_*.py'
+      - name: Check packaging shell syntax
+        run: for script in github_appimage_build.sh packaging/*.sh; do bash -n "$script"; done
+      - name: Test Android SDK installer
+        run: node --test tool/install_android_sdk_test.cjs
+      - name: Test Android launch configuration
+        run: node --test tool/android_launch_config_test.cjs
+
+  integration-linux:
+    name: Linux integration test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          architecture: x64
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - name: Install Linux integration-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev \
+            libblkid-dev liblzma-dev xvfb xauth
+      - name: Install project dependencies
+        run: flutter pub get --enforce-lockfile
+      - name: Enable Linux desktop
+        run: flutter config --enable-linux-desktop
+      - name: Run Linux integration tests
+        run: |
+          set -o pipefail
+          xvfb-run -a -s '-screen 0 1920x1080x24' bash tool/integration_linux.sh --no-pub 2>&1 | tee integration-linux.log
+      - name: Upload integration test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-linux-log
+          path: integration-linux.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  integration-desktop:
+    name: Integration / ${{ matrix.device }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            device: windows
+            architecture: x64
+          - os: macos-15
+            device: macos
+            architecture: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          architecture: ${{ matrix.architecture }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter config --enable-${{ matrix.device }}-desktop
+      - name: Run desktop integration tests
+        shell: bash
+        run: bash tool/integration_ci.sh ${{ matrix.device }} integration_test/desktop_test.dart
+      - name: Upload platform diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-${{ matrix.device }}
+          path: integration-*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  integration-android:
+    name: Integration / Android API ${{ matrix.api }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # API 29 exercises bionic's pre-renameat2-export syscall fallback.
+        api: [29, 35]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          architecture: x64
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - run: flutter pub get --enforce-lockfile
+      - name: Install compile SDK
+        run: bash tool/install_android_sdk.sh
+      - name: Generate Android Gradle Wrapper
+        if: matrix.api == 35
+        run: flutter build apk --debug --config-only
+      - name: Test Android document URI handling
+        # Robolectric runs both API 29 and 35; run the suite once per workflow.
+        if: matrix.api == 35
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --console=plain
+      - name: Enable KVM access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run on a fresh Android emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: google_apis
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash tool/integration_ci.sh emulator-5554 integration_test/platform_test.dart
+      - name: Upload Android diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-android-${{ matrix.api }}
+          path: |
+            integration-*.log
+            build/app/outputs/logs/
+            build/app/reports/tests/testDebugUnitTest/
+            build/app/test-results/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  integration-ios:
+    name: Integration / iOS simulator
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          architecture: arm64
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - name: Keep the existing CocoaPods dependency manager
+        # This project has custom Podfile logic. Avoid spending every clean CI
+        # run auto-migrating an ephemeral checkout to Swift Package Manager.
+        run: flutter config --no-enable-swift-package-manager
+      - run: flutter pub get --enforce-lockfile
+      - name: Create and boot a disposable iPhone simulator
+        run: node tool/boot_ios_simulator.cjs
+      - name: Verify Flutter can see the booted simulator
+        run: |
+          xcodebuild -version | tee integration-simulator-state.log
+          xcrun --sdk iphonesimulator --show-sdk-version | tee -a integration-simulator-state.log
+          xcrun simctl list devices | tee -a integration-simulator-state.log
+          flutter devices --device-timeout 60 | tee -a integration-simulator-state.log
+      - name: Run iOS integration tests (no signing secrets needed)
+        env:
+          # The timeout also covers compiling, installing, and connecting the
+          # integration-test host. A clean Xcode build regularly exceeds 2m,
+          # but a launched app should expose its VM service well before 5m.
+          RENAMER_TEST_TIMEOUT: 5m
+          RENAMER_FLUTTER_VERBOSE: true
+          RENAMER_RETRY_IOS_STARTUP: true
+        run: bash tool/integration_ci.sh "$RENAMER_SIMULATOR_ID" integration_test/platform_test.dart
+      - name: Capture simulator diagnostics
+        if: failure() && env.RENAMER_SIMULATOR_ID != ''
+        run: xcrun simctl spawn "$RENAMER_SIMULATOR_ID" log show --last 10m --style compact > integration-device.log 2>&1 || true
+      - name: Remove the job-owned simulator
+        if: always() && env.RENAMER_SIMULATOR_ID != ''
+        run: |
+          xcrun simctl shutdown "$RENAMER_SIMULATOR_ID" || true
+          xcrun simctl delete "$RENAMER_SIMULATOR_ID"
+      - name: Upload iOS diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-ios
+          path: integration-*.log
+          if-no-files-found: ignore
+          retention-days: 7

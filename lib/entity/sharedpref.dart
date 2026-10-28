@@ -9,6 +9,8 @@ class Shared {
     _onlySelected = pref.getBool(_onlySelectedKey) ?? _onlySelected;
     _removeRenamed = pref.getBool(_removeRenamedKey) ?? _removeRenamed;
     _removeRules = pref.getBool(_removeRulesKey) ?? _removeRules;
+    _showThumbnails = pref.getBool(_showThumbnailsKey) ?? false;
+    _hapticFeedback = pref.getBool(_hapticFeedbackKey) ?? true;
     _ruleName = pref.getString(_ruleNameKey) ?? _ruleName;
     _doNotRemindAgain = pref.getBool(_doNotRemindAgainKey) ?? _doNotRemindAgain;
   }
@@ -21,6 +23,8 @@ class Shared {
   static const _onlySelectedKey = 'only_selected';
   static const _removeRenamedKey = 'remove_renamed';
   static const _removeRulesKey = 'remove_rules';
+  static const _showThumbnailsKey = 'show_thumbnails';
+  static const _hapticFeedbackKey = 'haptic_feedback';
   static const _ruleNameKey = 'rule_name';
   static const _doNotRemindAgainKey = 'do_not_remind_again';
 
@@ -50,6 +54,20 @@ class Shared {
   static set removeRules(bool value) {
     _removeRules = value;
     pref.setBool(_removeRulesKey, value);
+  }
+
+  static bool _showThumbnails = false;
+  static bool get showThumbnails => _showThumbnails;
+  static set showThumbnails(bool value) {
+    _showThumbnails = value;
+    pref.setBool(_showThumbnailsKey, value);
+  }
+
+  static bool _hapticFeedback = true;
+  static bool get hapticFeedback => _hapticFeedback;
+  static set hapticFeedback(bool value) {
+    _hapticFeedback = value;
+    pref.setBool(_hapticFeedbackKey, value);
   }
 
   static String _ruleName = 'Replace';

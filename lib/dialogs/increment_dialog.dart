@@ -6,8 +6,14 @@ import '../l10n/l10n.dart';
 import '../rules/rule.dart';
 import '../widget/checkbox_tile.dart';
 import '../widget/custom_dialog.dart';
+import '../widget/text_field_with_direction.dart';
 
-void showIncrementDialog(BuildContext context, Function(Rule) onSave, [RuleIncrement? rule]) => showDialog(
+void showIncrementDialog(
+  BuildContext context,
+  Function(Rule) onSave, [
+  RuleIncrement? rule,
+]) =>
+    showDialog(
       context: context,
       builder: (context) => IncrementDialog(
         onSave: onSave,
@@ -33,20 +39,44 @@ class _IncrementDialogState extends State<IncrementDialog> {
   TextEditingController stepController = TextEditingController(
     text: '1',
   );
+  TextEditingController digitsController = TextEditingController(
+    text: '1',
+  );
+  final suffixController = TextEditingController();
+  final positionController = TextEditingController(text: '0');
+  final toEnd = ValueNotifier(false);
+  IncrementMode mode = IncrementMode.replace;
   bool omitDash = false;
   bool ignoreExtension = true;
 
   @override
   void initState() {
     if (widget.rule != null) {
+      mode = widget.rule!.mode;
+      suffixController.text = widget.rule!.suffix;
+      positionController.text = widget.rule!.insertIndex.toString();
+      toEnd.value = widget.rule!.toEnd;
       prefixController.text = widget.rule!.prefix;
-      indexController.text = widget.rule!.index.toString();
+      indexController.text = widget.rule!.startIndex.toString();
       stepController.text = widget.rule!.step.toString();
+      digitsController.text = widget.rule!.minimumDigits.toString();
       omitDash = widget.rule!.omitDash;
       ignoreExtension = widget.rule!.ignoreExtension;
     }
 
     super.initState();
+  }
+
+  @override
+  void dispose() {
+    prefixController.dispose();
+    indexController.dispose();
+    stepController.dispose();
+    digitsController.dispose();
+    suffixController.dispose();
+    positionController.dispose();
+    toEnd.dispose();
+    super.dispose();
   }
 
   @override
@@ -57,10 +87,32 @@ class _IncrementDialogState extends State<IncrementDialog> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(L10n.current.descriptionIncrement),
+            DropdownButtonFormField<IncrementMode>(
+              initialValue: mode,
+              isExpanded: true,
+              decoration:
+                  InputDecoration(labelText: L10n.current.numberingMode),
+              items: [
+                DropdownMenuItem(
+                  value: IncrementMode.replace,
+                  child: Text(L10n.current.replaceOriginalName),
+                ),
+                DropdownMenuItem(
+                  value: IncrementMode.insert,
+                  child: Text(L10n.current.insertIntoOriginalName),
+                ),
+              ],
+              onChanged: (value) => setState(() => mode = value ?? mode),
+            ),
+            box,
+            Text(
+              mode == IncrementMode.replace
+                  ? L10n.current.descriptionIncrement
+                  : L10n.current.descriptionInsertNumber,
+            ),
             TextFormField(
               controller: prefixController,
-              decoration: InputDecoration(labelText: L10n.current.prefix),
+              decoration: InputDecoration(labelText: L10n.current.numberPrefix),
             ),
             box,
             TextFormField(
@@ -73,22 +125,47 @@ class _IncrementDialogState extends State<IncrementDialog> {
             ),
             box,
             TextFormField(
+              controller: digitsController,
+              keyboardType: TextInputType.number,
+              inputFormatters: <TextInputFormatter>[
+                FilteringTextInputFormatter.allow(RegExp('[0-9]')), // 只允许数字
+              ],
+              decoration:
+                  InputDecoration(labelText: L10n.current.numberOfDigits),
+            ),
+            box,
+            TextFormField(
               controller: stepController,
               keyboardType: TextInputType.number,
               inputFormatters: <TextInputFormatter>[
                 FilteringTextInputFormatter.allow(RegExp('[0-9]')), // 只允许数字
               ],
-              decoration: InputDecoration(labelText: L10n.current.indexIncrementalStep),
+              decoration:
+                  InputDecoration(labelText: L10n.current.indexIncrementalStep),
             ),
-            CheckboxTile(
-              title: Text(L10n.current.omitDash),
-              value: omitDash,
-              onChanged: (value) {
-                setState(() {
-                  omitDash = value ?? omitDash;
-                });
-              },
+            TextFormField(
+              controller: suffixController,
+              decoration: InputDecoration(labelText: L10n.current.numberSuffix),
             ),
+            if (mode == IncrementMode.insert) ...[
+              box,
+              DirectionTextField(
+                con: positionController,
+                toEnd: toEnd,
+                labelText: L10n.current.insertIndex,
+              ),
+              Text(L10n.current.numberPositionHint),
+            ],
+            if (mode == IncrementMode.replace)
+              CheckboxTile(
+                title: Text(L10n.current.omitDash),
+                value: omitDash,
+                onChanged: (value) {
+                  setState(() {
+                    omitDash = value ?? omitDash;
+                  });
+                },
+              ),
             CheckboxTile(
               title: Text(L10n.current.ignoreExtension),
               value: ignoreExtension,
@@ -113,6 +190,7 @@ class _IncrementDialogState extends State<IncrementDialog> {
             String prefix = prefixController.text;
             int startIndex = int.tryParse(indexController.text) ?? 0;
             int step = int.tryParse(stepController.text) ?? 0;
+            int minimumDigits = int.tryParse(digitsController.text) ?? 0;
 
             final Rule rule = RuleIncrement(
               prefix,
@@ -120,6 +198,11 @@ class _IncrementDialogState extends State<IncrementDialog> {
               step,
               omitDash,
               ignoreExtension,
+              minimumDigits: minimumDigits,
+              mode: mode,
+              insertIndex: int.tryParse(positionController.text) ?? 0,
+              toEnd: toEnd.value,
+              suffix: suffixController.text,
             );
 
             widget.onSave.call(rule);

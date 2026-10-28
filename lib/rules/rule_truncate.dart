@@ -15,24 +15,20 @@ class RuleTruncate implements Rule {
   final bool i1toEnd;
   final bool i2toEnd;
   final bool ignoreExtension;
-  final bool keepBetween; // true: keep chars between 2 indexes, false: keep chars around them
+  final bool
+      keepBetween; // true: keep chars between 2 indexes, false: keep chars around them
+
+  @override
+  bool get requiresMetadata => false;
 
   @override
   String newName(String oldName, {FileMetadata? metadata}) {
     String newName, extension;
     (newName, extension) = splitFileName(oldName, ignoreExtension);
 
-    int start = index1;
-
-    if (i1toEnd) {
-      start = newName.length + start;
-    }
-
-    int end = index2;
-
-    if (i2toEnd) {
-      end = newName.length + end;
-    }
+    final characters = newName.characters.toList();
+    int start = _characterPosition(characters.length, index1, i1toEnd);
+    int end = _characterPosition(characters.length, index2, i2toEnd);
 
     if (start > end) {
       final temp = start;
@@ -41,9 +37,9 @@ class RuleTruncate implements Rule {
     }
 
     if (keepBetween) {
-      newName = newName.substring(start, end);
+      newName = characters.sublist(start, end).join();
     } else {
-      newName = newName.replaceRange(start, end, '');
+      newName = characters.take(start).join() + characters.skip(end).join();
     }
 
     return newName + extension;
@@ -63,5 +59,30 @@ class RuleTruncate implements Rule {
   }
 
   @override
-  void openDialog(BuildContext context, Function(Rule rule) onSave) => showTruncateDialog(context, onSave, this);
+  Map<String, dynamic> toMap() {
+    return {
+      'type': 'Truncate',
+      'index1': index1,
+      'index2': index2,
+      'i1toEnd': i1toEnd,
+      'i2toEnd': i2toEnd,
+      'ignoreExtension': ignoreExtension,
+      'keepBetween': keepBetween,
+    };
+  }
+
+  factory RuleTruncate.fromMap(Map<dynamic, dynamic> map) {
+    return RuleTruncate(
+      map['index1'] as int,
+      map['index2'] as int,
+      map['i1toEnd'] as bool,
+      map['i2toEnd'] as bool,
+      map['ignoreExtension'] as bool,
+      map['keepBetween'] as bool,
+    );
+  }
+
+  @override
+  void openDialog(BuildContext context, Function(Rule rule) onSave) =>
+      showTruncateDialog(context, onSave, this);
 }

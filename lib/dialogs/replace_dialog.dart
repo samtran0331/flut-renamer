@@ -6,7 +6,9 @@ import '../l10n/l10n.dart';
 import '../rules/rule.dart';
 import '../widget/checkbox_tile.dart';
 import '../widget/custom_dialog.dart';
+import '../widget/date_format_dropdown.dart';
 import '../widget/metadata_tile.dart';
+import '../tools/file_metadata.dart';
 
 void showReplaceDialog(BuildContext context, Function(Rule) onSave, [RuleReplace? rule]) => showDialog(
       context: context,
@@ -39,6 +41,7 @@ class _ReplaceDialogState extends State<ReplaceDialog> {
   bool caseSensitive = false;
   bool isRegex = false;
   bool ignoreExtension = true;
+  String dateFormat = FileMetadata.defaultDateFormat;
   late bool remove;
   late String ruleName;
 
@@ -56,9 +59,31 @@ class _ReplaceDialogState extends State<ReplaceDialog> {
       caseSensitive = widget.rule!.caseSensitive;
       isRegex = widget.rule!.isRegex;
       ignoreExtension = widget.rule!.ignoreExtension;
+      dateFormat = widget.rule!.dateFormat;
     }
 
     super.initState();
+  }
+
+  Widget _replacementTextField(
+    TextEditingController controller,
+    String label,
+  ) {
+    // Flutter only exposes RenderEditable's setText action while focused.
+    // Automation can set an unfocused field through Android accessibility;
+    // update the controller so both the display and the saved rule see it.
+    return Semantics(
+      onSetText: (text) {
+        controller.value = TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+        );
+      },
+      child: TextFormField(
+        controller: controller,
+        decoration: InputDecoration(labelText: label),
+      ),
+    );
   }
 
   @override
@@ -70,15 +95,15 @@ class _ReplaceDialogState extends State<ReplaceDialog> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(remove ? L10n.current.descriptionRemove : L10n.current.descriptionReplace),
-            TextFormField(
-              controller: targetController,
-              decoration: InputDecoration(labelText: '$ruleName ${L10n.current.target}'),
+            _replacementTextField(
+              targetController,
+              '$ruleName ${L10n.current.target}',
             ),
             box,
             if (!remove)
-              TextFormField(
-                controller: replacementController,
-                decoration: InputDecoration(labelText: L10n.current.replacement),
+              _replacementTextField(
+                replacementController,
+                L10n.current.replacement,
               ),
             if (!remove) box,
             TextFormField(
@@ -100,6 +125,16 @@ class _ReplaceDialogState extends State<ReplaceDialog> {
             ),
             if (!remove)
               MetadataTile(textController: replacementController, withMetadata: withMetadata),
+            if (!remove)
+              ValueListenableBuilder<bool>(
+                valueListenable: withMetadata,
+                builder: (context, usesMetadata, child) => usesMetadata
+                    ? DateFormatDropdown(
+                        value: dateFormat,
+                        onChanged: (value) => setState(() => dateFormat = value),
+                      )
+                    : const SizedBox.shrink(),
+              ),
             CheckboxTile(
               title: Text(L10n.current.caseSensitive),
               value: caseSensitive,
@@ -161,6 +196,7 @@ class _ReplaceDialogState extends State<ReplaceDialog> {
                 caseSensitive,
                 isRegex,
                 ignoreExtension,
+                dateFormat: dateFormat,
               );
             }
             widget.onSave.call(rule);

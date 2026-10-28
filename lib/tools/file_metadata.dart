@@ -1,85 +1,134 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:audio_metadata_reader/audio_metadata_reader.dart';
+// ignore: implementation_imports
+import 'package:audio_metadata_reader/src/metadata/base.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:exif/exif.dart';
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
 
-import '../tools/ex_file.dart';
+import 'ex_file.dart';
+import 'audio_metadata.dart';
+import 'file_creation_time.dart';
+import 'platform_channel.dart';
 
 final metadataTagRegex = RegExp(r'\{([A-Za-z]+:[A-Za-z]+)\}');
 
 class FileMetadata {
-  FileMetadata(this.file) {
-    if (!file.existsSync()) {
-      throw PathNotFoundException(file.path, const OSError());
+  FileMetadata(
+    FileSystemEntity source, {
+    CreationTimeReader creationTimeReader = readFileCreationTime,
+  })  : _creationTimeReader = creationTimeReader,
+        file = source is Link ? source.toFileSystemEntity() : source {
+    if (Platform.isAndroid && file.path.startsWith('content://')) {
+      return;
     }
 
-    while (file is Link) {
-      file = (file as Link).toFileSystemEntity();
+    if (!file.existsSync()) {
+      throw PathNotFoundException(file.path, const OSError());
     }
   }
 
   Future<void> init() async {
     if (!inited) {
-      _stat = await file.stat();
-
-      if (file is Directory) {
-        _bytes = Uint8List(0);
-        _exif = {};
+      if (Platform.isAndroid && file.path.startsWith('content://')) {
+        await _initFromSaf();
       } else {
-        _bytes = await (file as File).readAsBytes();
-        _exif = await readExifFromBytes(_bytes);
-        _metadata = await readMetadata(file as File, getImage: false);
-      }
+        _stat = await file.stat();
+        _created = await _creationTimeReader(file.path, _stat);
 
+        if (file is Directory) {
+          _clearContentMetadata();
+        } else {
+          _clearContentMetadata();
+          _exif = await readExifFromFile(file as File);
+          if (supportedFileExtensions
+              .contains(p.extension(file.path).toLowerCase())) {
+            final audioFilePath = file.path;
+            _audioMetadata = await Isolate.run(
+              () => _tryReadAudioMetadata(audioFilePath),
+            );
+          }
+        }
+      }
       inited = true;
     }
   }
 
-  late final FileSystemEntity file;
+  final FileSystemEntity file;
+  final CreationTimeReader _creationTimeReader;
+  DateTime? _created;
   late FileStat _stat;
   late Uint8List _bytes;
   late Map<String, IfdTag> _exif;
-  late AudioMetadata? _metadata;
+  late _AudioMetadata? _audioMetadata;
+  Map<String, String> _androidEmbeddedMetadata = const {};
   bool inited = false;
+  late String androidRealName;
 
   static final _key = utf8.encode('renamer');
-  static final _date = DateFormat('y-MM-d');
-  static final _time = DateFormat('y-MM-d HH-mm-ss');
+  static const defaultDateFormat = 'yyyy-MM-dd';
+  static const dateFormats = <String>[
+    defaultDateFormat,
+    'yyyy_MM_dd',
+    'yyyyMMdd',
+    'yyyy-MMM-dd',
+    'yyyy_MMM_dd',
+    'yyyyMMMdd',
+    'dd-MM-yyyy',
+    'dd_MM_yyyy',
+    'dd-MMM-yyyy',
+    'dd_MMM_yyyy',
+    'MM-dd-yyyy',
+    'MM_dd_yyyy',
+    'MMM-dd-yyyy',
+    'MMM_dd_yyyy',
+  ];
 
-  String getByName(String name) {
+  String getByName(
+    String name, {
+    String dateFormat = defaultDateFormat,
+  }) {
+    if (Platform.isAndroid && file.path.startsWith('content://')) {
+      final value = _androidEmbeddedMetadata[name];
+      if (value != null && name != 'Photo:Date' && name != 'Photo:Time') {
+        return value;
+      }
+    }
+
     switch (name) {
       case 'OS:TodayDate':
-        return _date.format(DateTime.now().toLocal());
+        return _formatDate(DateTime.now().toLocal(), dateFormat);
       case 'OS:NowTime':
-        return _time.format(DateTime.now().toLocal());
+        return _formatTime(DateTime.now().toLocal(), dateFormat);
       case 'File:Size':
         return _formatFileSize(_stat.size);
       case 'File:CreateDate':
-        return _date.format(_stat.changed.toLocal());
+        return _created == null
+            ? ''
+            : _formatDate(_created!.toLocal(), dateFormat);
       case 'File:CreateTime':
-        return _time.format(_stat.changed.toLocal());
+        return _created == null
+            ? ''
+            : _formatTime(_created!.toLocal(), dateFormat);
       case 'File:ModifyDate':
-        return _date.format(_stat.modified.toLocal());
+        return _formatDate(_stat.modified.toLocal(), dateFormat);
       case 'File:ModifyTime':
-        return _time.format(_stat.modified.toLocal());
+        return _formatTime(_stat.modified.toLocal(), dateFormat);
       case 'Photo:Date':
-        return (_exif['EXIF DateTime'] ??
-                _exif['EXIF DateTimeOriginal'] ??
-                _exif['EXIF DateTimeDigitized'] ??
-                '')
-            .toString()
-            .split(' ')
-            .first;
+        final value = _parsePhotoDate();
+        return value == null
+            ? _photoDateValue()
+            : _formatDate(value, dateFormat);
       case 'Photo:Time':
-        return (_exif['EXIF DateTime'] ??
-                _exif['EXIF DateTimeOriginal'] ??
-                _exif['EXIF DateTimeDigitized'] ??
-                '')
-            .toString();
+        final value = _parsePhotoDateTime();
+        return value == null
+            ? _photoTimeValue()
+            : _formatTime(value, dateFormat);
       case 'Photo:CamName':
         final oem = (_exif['Image Make'] ?? '').toString();
         final model = (_exif['Image Model'] ?? '').toString();
@@ -99,9 +148,15 @@ class FileMetadata {
       case 'Photo:ISO':
         return (_exif['EXIF ISOSpeedRatings'] ?? '').toString();
       case 'Photo:Longitude':
-        return _getLatLng(_exif['GPS GPSLongitude'], _exif['GPS GPSLongitudeRef']);
+        return _getLatLng(
+          _exif['GPS GPSLongitude'],
+          _exif['GPS GPSLongitudeRef'],
+        );
       case 'Photo:Latitude':
-        return _getLatLng(_exif['GPS GPSLatitude'], _exif['GPS GPSLatitudeRef']);
+        return _getLatLng(
+          _exif['GPS GPSLatitude'],
+          _exif['GPS GPSLatitudeRef'],
+        );
       case 'Photo:Altitude':
         return (_exif['GPS GPSAltitude'] ?? 0).toString();
       case 'Photo:Photographer':
@@ -109,27 +164,27 @@ class FileMetadata {
       case 'Photo:Copyright':
         return (_exif['Image Copyright'] ?? '').toString();
       case 'Music:AlbumName':
-        return (_metadata?.album ?? '');
+        return (_audioMetadata?.album ?? '');
       // case 'Music:AlbumArtist':
       //   return (_metadata?.artist ?? '');
       // case 'Music:AlbumLength':
       //   return (_metadata. ?? '').toString();
       case 'Music:Year':
-        return (_metadata?.year?.year ?? '').toString();
+        return (_audioMetadata?.year?.year ?? '').toString();
       case 'Music:TrackDuration':
-        return (_formatDuration(_metadata?.duration) ?? '').toString();
+        return (formatDuration(_audioMetadata?.duration) ?? '').toString();
       case 'Music:TrackName':
-        return (_metadata?.title ?? '').toString();
+        return (_audioMetadata?.title ?? '').toString();
       // case 'Music:TrackArtist':
       //   return (_metadata.artist ?? '');
       case 'Music:TrackNumber':
-        return (_metadata?.trackNumber ?? '').toString();
+        return (_audioMetadata?.trackNumber ?? '').toString();
       case 'Music:DiscNumber':
-        return (_metadata?.discNumber ?? '').toString();
+        return (_audioMetadata?.discNumber ?? '').toString();
       case 'Music:Genres':
-        return (_metadata?.genres.join(',') ?? '').toString();
+        return (_audioMetadata?.genres.join(',') ?? '').toString();
       case 'Music:Author':
-        return (_metadata?.artist ?? '');
+        return (_audioMetadata?.trackArtist ?? '');
       // case 'Music:Writer':
       //   return (_metadata?.writerName ?? '');
       default:
@@ -137,10 +192,52 @@ class FileMetadata {
     }
   }
 
-  String parse(String target) => target.replaceAllMapped(
+  String parse(
+    String target, {
+    String dateFormat = defaultDateFormat,
+  }) =>
+      target.replaceAllMapped(
         metadataTagRegex,
-        (match) => getByName(match.group(1).toString()),
+        (match) => getByName(match.group(1).toString(), dateFormat: dateFormat),
       );
+
+  String _formatDate(DateTime value, String format) =>
+      DateFormat(_validDateFormat(format)).format(value);
+
+  String _formatTime(DateTime value, String format) =>
+      DateFormat('${_validDateFormat(format)} HH-mm-ss').format(value);
+
+  String _validDateFormat(String format) =>
+      dateFormats.contains(format) ? format : defaultDateFormat;
+
+  String _photoDateValue() => _photoTimeValue().split(' ').first;
+
+  String _photoTimeValue() {
+    if (Platform.isAndroid && file.path.startsWith('content://')) {
+      return _androidEmbeddedMetadata['Photo:Time'] ??
+          _androidEmbeddedMetadata['Photo:Date'] ??
+          '';
+    }
+    return (_exif['EXIF DateTime'] ??
+            _exif['EXIF DateTimeOriginal'] ??
+            _exif['EXIF DateTimeDigitized'] ??
+            '')
+        .toString();
+  }
+
+  DateTime? _parsePhotoDate() {
+    final value = _photoDateValue();
+    return DateFormat('yyyy:MM:dd').tryParseStrict(value) ??
+        DateFormat('yyyy-MM-dd').tryParseStrict(value) ??
+        DateFormat('yyyy/MM/dd').tryParseStrict(value);
+  }
+
+  DateTime? _parsePhotoDateTime() {
+    final value = _photoTimeValue();
+    return DateFormat('yyyy:MM:dd HH:mm:ss').tryParseStrict(value) ??
+        DateFormat('yyyy-MM-dd HH:mm:ss').tryParseStrict(value) ??
+        DateFormat('yyyy/MM/dd HH:mm:ss').tryParseStrict(value);
+  }
 
   String _getLatLng(IfdTag? coordTag, IfdTag? refTag) {
     if (coordTag == null) {
@@ -157,8 +254,10 @@ class FileMetadata {
       final List<Ratio> coordinate = (tag.values as IfdRatios).ratios;
       if (coordinate.isNotEmpty) {
         int degrees = _parseRatio(coordinate[0]).toInt();
-        int minutes = coordinate.length > 1 ? _parseRatio(coordinate[1]).toInt() : 0;
-        double seconds = coordinate.length > 2 ? _parseRatio(coordinate[2]) : 0.0;
+        int minutes =
+            coordinate.length > 1 ? _parseRatio(coordinate[1]).toInt() : 0;
+        double seconds =
+            coordinate.length > 2 ? _parseRatio(coordinate[2]) : 0.0;
         return '$degrees°$minutes′$seconds″';
       }
     }
@@ -178,10 +277,12 @@ class FileMetadata {
   }
 
   Future<String> get md5 async {
-    var hash = crypto.Hmac(crypto.md5, _key); // HMAC-SHA256
-    var digest = hash.convert(_bytes);
-
-    return digest.toString();
+    final hash = crypto.Hmac(crypto.md5, _key);
+    if (file is! File ||
+        (Platform.isAndroid && file.path.startsWith('content://'))) {
+      return hash.convert(_bytes).toString();
+    }
+    return (await hash.bind((file as File).openRead()).first).toString();
   }
 
   static const List<String> _sizeUnits = [
@@ -210,7 +311,8 @@ class FileMetadata {
     throw AssertionError('Unreachable');
   }
 
-  String? _formatDuration(Duration? dur) {
+  /// Formats a track length without using [Duration]'s cumulative units.
+  static String? formatDuration(Duration? dur) {
     if (dur == null) {
       return null;
     }
@@ -220,19 +322,126 @@ class FileMetadata {
       return "0$n";
     }
 
-    int centiseconds = dur.inMilliseconds ~/ 10;
-    int seconds = dur.inSeconds;
-    int minutes = dur.inMinutes;
+    int centiseconds = (dur.inMilliseconds ~/ 10) % 100;
+    int seconds = dur.inSeconds % 60;
+    int minutes = dur.inMinutes % 60;
     int hours = dur.inHours;
 
-    if (hours > 0){
+    if (hours > 0) {
       return '$hours:${twoDigits(minutes)}:${twoDigits(seconds)}.${twoDigits(centiseconds)}';
-    } else if(minutes > 0){
+    } else if (minutes > 0) {
       return '${twoDigits(minutes)}:${twoDigits(seconds)}.${twoDigits(centiseconds)}';
-    } else if (seconds > 0){
+    } else if (seconds > 0) {
       return '${twoDigits(seconds)}.${twoDigits(centiseconds)}sec';
     } else {
       return '${dur.inMilliseconds}ms';
     }
   }
+
+  Future<void> _initFromSaf() async {
+    // SAF exposes last-modified time, not birth time. Keep creation tags empty.
+    _created = null;
+    final metaMap = await PlatformFilePicker.getMetaData(file.path);
+    androidRealName = (metaMap?['name'] as String?) ?? "unknown";
+
+    final now = DateTime.now();
+
+    final modified = metaMap != null && metaMap['modified'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(metaMap['modified'] as int)
+        : now;
+
+    _stat = _FileStat(
+      modified: modified,
+      changed: modified,
+      accessed: now,
+      size: metaMap != null && metaMap['size'] != null
+          ? metaMap['size'] as int
+          : 0,
+    );
+
+    _clearContentMetadata();
+    // AndroidX ExifInterface and MediaMetadataRetriever read directly from
+    // the content URI, avoiding a full file copy into Dart memory.
+    if (file is! Directory) {
+      _androidEmbeddedMetadata =
+          await PlatformFilePicker.getEmbeddedMetadata(file.path);
+    }
+  }
+
+  void _clearContentMetadata() {
+    _bytes = Uint8List(0);
+    _exif = {};
+    _audioMetadata = null;
+  }
+
+  static _AudioMetadata? _tryReadAudioMetadata(String path) {
+    try {
+      final metadata = readAllMetadata(File(path), getImage: false);
+      return _AudioMetadata.fromParserTag(metadata);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// The subset of audio tags used by renaming rules. Keeping this data-only
+/// makes the result safe to transfer back from the audio parsing isolate.
+class _AudioMetadata {
+  const _AudioMetadata({
+    this.album,
+    this.year,
+    this.duration,
+    this.title,
+    this.trackNumber,
+    this.discNumber,
+    this.genres = const [],
+    this.trackArtist,
+  });
+
+  factory _AudioMetadata.fromParserTag(ParserTag metadata) => _AudioMetadata(
+        album: metadata.album,
+        year: metadata.year,
+        duration: metadata.duration,
+        title: metadata.title,
+        trackNumber: metadata.trackNumber,
+        discNumber: metadata.discNumber,
+        genres: List<String>.from(metadata.genres),
+        trackArtist: metadata.trackArtist,
+      );
+
+  final String? album;
+  final DateTime? year;
+  final Duration? duration;
+  final String? title;
+  final int? trackNumber;
+  final int? discNumber;
+  final List<String> genres;
+  final String? trackArtist;
+}
+
+class _FileStat implements FileStat {
+  @override
+  final DateTime changed;
+  @override
+  final DateTime modified;
+  @override
+  final DateTime accessed;
+  @override
+  final int size;
+
+  _FileStat({
+    required this.changed,
+    required this.modified,
+    required this.accessed,
+    required this.size,
+  });
+
+  @override
+  FileSystemEntityType get type => FileSystemEntityType.file;
+
+  @override
+  String modeString() => "rwxrwxrwx";
+
+  @override
+  int get mode => 0;
 }

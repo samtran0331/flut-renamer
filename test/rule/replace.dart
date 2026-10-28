@@ -1,9 +1,27 @@
-library renamer.test.rule.replace;
+library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flut_renamer/rules/rule.dart';
 
 void main() {
+  test('issue #23: empty target leaves the name unchanged', () async {
+    for (final isRegex in [false, true]) {
+      final rule = RuleReplace('', '新增', 0, false, false, isRegex, true);
+      expect(await rule.newName('文件名.txt'), '文件名.txt');
+    }
+  });
+
+  test('issue #46: case-sensitive replacement changes extension casing',
+      () async {
+    final rule = RuleReplace('.SRT', '.srt', 0, false, true, false, false);
+    const basename =
+        'Warau.Matryoshka.EP06.1080p.U-NEXT.WEB-DL.AAC2.0.H.264-MagicStar';
+
+    expect(await rule.newName('$basename.SRT'), '$basename.srt');
+    expect(await rule.newName('$basename.Srt'), '$basename.Srt');
+    expect(await rule.newName('$basename.srt'), '$basename.srt');
+  });
+
   test('basic replace', () async {
     String fileName = "file_example_file_name_file.file";
     String targetString = "file";
@@ -136,6 +154,20 @@ void main() {
     expect(newFileName, "data_example_file_name_file.file");
   });
 
+  test('limited replacement uses matches from the original name', () async {
+    final newFileName = await RuleReplace(
+      'a',
+      'ab',
+      2,
+      false,
+      true,
+      false,
+      true,
+    ).newName('a_a_a.txt');
+
+    expect(newFileName, 'ab_ab_a.txt');
+  });
+
   test('replace last', () async {
     String fileName = "file_example_file_name_file.file";
     String targetString = "file";
@@ -200,5 +232,61 @@ void main() {
     ).newName(fileName);
 
     expect(newFileName, "example_data_name.txt");
+  });
+
+  test('regex replacement preserves two-digit capture references', () async {
+    final newFileName = await RuleReplace(
+      '(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)',
+      r'\10-\1',
+      1,
+      false,
+      false,
+      true,
+      true,
+    ).newName('abcdefghij.txt');
+
+    expect(newFileName, 'j-a.txt');
+  });
+
+  test('does not parse metadata tags when metadata is disabled', () async {
+    final newFileName = await RuleReplace(
+      'file',
+      '{File:Size}',
+      0,
+      false,
+      false,
+      false,
+      true,
+    ).newName('file.txt');
+
+    expect(newFileName, '{File:Size}.txt');
+  });
+
+  test('replace with a random string', () async {
+    final newFileName = await RuleReplace(
+      'file',
+      '{RandomString}',
+      0,
+      false,
+      false,
+      false,
+      true,
+    ).newName('file.txt');
+
+    expect(newFileName, matches(RegExp(r'^[a-f0-9]{8}\.txt$')));
+  });
+
+  test('replace with a custom-length random string', () async {
+    final newFileName = await RuleReplace(
+      'file',
+      '{RandomString:12}',
+      0,
+      false,
+      false,
+      false,
+      true,
+    ).newName('file.txt');
+
+    expect(newFileName, matches(RegExp(r'^[a-f0-9]{12}\.txt$')));
   });
 }

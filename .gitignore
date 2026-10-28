@@ -32,6 +32,10 @@ migrate_working_dir/
 .pub/
 /build/
 
+# Swift Package Manager
+.build/
+.swiftpm/
+
 # Symbolication related
 app.*.symbols
 
@@ -43,4 +47,6 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 *.AppImage
-pubspec.lock
+
+# Local dependency checkouts
+/pubspec_overrides.yaml

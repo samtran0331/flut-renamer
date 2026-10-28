@@ -12,18 +12,36 @@ class RuleRearrange implements Rule {
   final bool ignoreExtension;
 
   @override
+  bool get requiresMetadata => false;
+
+  @override
   String newName(String oldName, {FileMetadata? metadata}) {
     String newName, extension;
     (newName, extension) = splitFileName(oldName, ignoreExtension);
 
     // split string
-    List<String> substrings = newName.split(delimiter);
+    final List<String> substrings;
+    if (delimiter.isEmpty) {
+      substrings = newName.characters.toList();
+    } else {
+      substrings = [];
+      var start = 0;
+      for (final match in _wholeCharacterMatches(newName, delimiter)) {
+        substrings.add(newName.substring(start, match.start));
+        start = match.end;
+      }
+      substrings.add(newName.substring(start));
+    }
 
     // remove indexes out of limit
-    final order = this.order.where((index) => index >= 1 && index <= substrings.length).toList();
+    final order = this
+        .order
+        .where((index) => index >= 1 && index <= substrings.length)
+        .toList();
 
     // rearrange substrings
-    List<String> reorderedSubstrings = order.map((index) => substrings[index - 1]).toList();
+    List<String> reorderedSubstrings =
+        order.map((index) => substrings[index - 1]).toList();
 
     // join substrings
     String result = reorderedSubstrings.join(delimiter);
@@ -37,5 +55,24 @@ class RuleRearrange implements Rule {
   }
 
   @override
-  void openDialog(BuildContext context, Function(Rule rule) onSave) => showRearrangeDialog(context, onSave, this);
+  Map<String, dynamic> toMap() {
+    return {
+      'type': 'Rearrange',
+      'delimiter': delimiter,
+      'order': order,
+      'ignoreExtension': ignoreExtension,
+    };
+  }
+
+  factory RuleRearrange.fromMap(Map<dynamic, dynamic> map) {
+    return RuleRearrange(
+      map['delimiter'] as String,
+      (map['order'] as List).cast<int>(),
+      map['ignoreExtension'] as bool,
+    );
+  }
+
+  @override
+  void openDialog(BuildContext context, Function(Rule rule) onSave) =>
+      showRearrangeDialog(context, onSave, this);
 }

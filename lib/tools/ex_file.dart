@@ -5,71 +5,155 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 
 import '../tools/file_metadata.dart';
+import '../tools/platform_channel.dart';
 
-class ExtFieldHandler<T> {
-  final Map<String, T> _values = {};
+/// The small subset of file metadata needed to sort the file list.
+///
+/// This is deliberately separate from [FileMetadata], whose initialization
+/// also reads EXIF and audio tags. Sorting a large list only needs these two
+/// values.
+class FileSortMetadata {
+  const FileSortMetadata({
+    required this.size,
+    required this.modified,
+  });
 
-  T? getValue(String path) => _values[path];
+  final int? size;
+  final DateTime? modified;
+}
 
-  void setValue(String path, T? value) {
-    if (value != null) {
-      _values[path] = value;
-    } else {
-      _values.remove(path);
+class FileEntity {
+  final FileSystemEntity entity;
+  bool selected;
+  String? error;
+  String? _newName;
+  FileMetadata? _metadata;
+  Future<void>? _metadataLoad;
+  FileSortMetadata? _sortMetadata;
+  Future<void>? _sortMetadataLoad;
+
+  FileEntity(this.entity, {this.selected = false, this.error, String? newName})
+      : _newName = newName;
+
+  String get path => entity.path;
+  String get name => p.basename(path);
+  String get directory => p.dirname(path);
+
+  String get newName => _newName ?? name;
+  set newName(String? val) => _newName = val;
+
+  String get newPath => p.join(directory, newName);
+
+  /// Relocation keeps row state, but metadata must be read at the new path.
+  FileEntity withPath(String path) => FileEntity(
+        entity is Directory
+            ? Directory(path)
+            : entity is Link
+                ? Link(path)
+                : File(path),
+        selected: selected,
+        error: error,
+        newName: _newName,
+      );
+
+  bool isNewNameDuplicate(List<FileEntity> others) {
+    final myNewPath = newPath;
+    return others.any((other) => other != this && other.newPath == myNewPath);
+  }
+
+  FileMetadata? get metadata => _metadata;
+
+  /// Creates the lazy metadata object without performing I/O. Rules can pass
+  /// this to one another and initialize it only when a tag is actually used.
+  FileMetadata get metadataForRename => _metadata ??= FileMetadata(entity);
+  FileSortMetadata? get sortMetadata => _sortMetadata;
+
+  /// Initializes metadata at most once, even when several rows request it
+  /// during the same build.
+  Future<void> initMetadata() async {
+    _metadata ??= FileMetadata(entity);
+    if (_metadata!.inited) return;
+
+    final initialization = _metadataLoad ??= _metadata!.init();
+    try {
+      await initialization;
+    } finally {
+      if (identical(_metadataLoad, initialization)) {
+        _metadataLoad = null;
+      }
     }
   }
 
-  void clearValues() => _values.clear();
+  /// Loads only the values used by size/date sorting and retains them for the
+  /// lifetime of this entity. In particular, SAF URIs must use the Android
+  /// metadata channel instead of Dart's file-system APIs.
+  Future<void> preloadSortMetadata() {
+    return _sortMetadataLoad ??= _loadSortMetadata();
+  }
 
-  bool checkDuplicatedPath(String path, T value) =>
-      _values.entries.where((e) => e.key != path && p.join(p.dirname(path), value.toString()) == p.join(p.dirname(e.key), e.value.toString())).isNotEmpty;
-}
-
-// an extension to control file list selection.
-extension ExFile on FileSystemEntity {
-  // get file name
-  String get name => p.basename(path);
-
-  // get the directory
-  String get directory => p.dirname(path);
-
-  static final ExtFieldHandler<bool> _selectionHandler = ExtFieldHandler();
-  bool get selected => _selectionHandler.getValue(path) ?? false;
-  set selected(bool? val) => _selectionHandler.setValue(path, val);
-  static void clearSelections() => _selectionHandler.clearValues();
-
-  static final ExtFieldHandler<String> _errorHandler = ExtFieldHandler();
-  String? get error => _errorHandler.getValue(path);
-  set error(String? val) => _errorHandler.setValue(path, val);
-  static void clearErrors() => _errorHandler.clearValues();
-
-  static final ExtFieldHandler<String> _newNameHandler = ExtFieldHandler();
-  String get newName => _newNameHandler.getValue(path) ?? name;
-  set newName(String? val) => _newNameHandler.setValue(path, val);
-  static void clearNewNames() => _newNameHandler.clearValues();
-
-  bool get newNameDuplicate => _newNameHandler.checkDuplicatedPath(path, newName);
-  String get newPath => p.join(directory, newName);
-
-  static final ExtFieldHandler<FileMetadata> _metadataHandler = ExtFieldHandler();
-  FileMetadata? get parser => _metadataHandler.getValue(path);
-  set parser(FileMetadata? metadata) => _metadataHandler.setValue(path, parser);
-  static void clearParsers() => _metadataHandler.clearValues();
-
-  String fileOrDir([bool returnLink=false]) {
-    FileSystemEntity file = this;
-
-    while (file is Link) {
-      if (returnLink) {
-        return 'Link';
+  Future<void> _loadSortMetadata() async {
+    try {
+      if (Platform.isAndroid && path.startsWith('content://')) {
+        final metadata = await PlatformFilePicker.getMetaData(path);
+        _sortMetadata = FileSortMetadata(
+          size: _metadataInt(metadata?['size']),
+          modified: _metadataDate(metadata?['modified']),
+        );
       } else {
-        file = file.toFileSystemEntity();
+        final stat = await entity.stat();
+        _sortMetadata = FileSortMetadata(
+          size: stat.size,
+          modified: stat.modified,
+        );
       }
+    } on FileSystemException {
+      // A file can disappear while its list entry is still visible. Leave its
+      // sort metadata unavailable so the comparator uses its name as a tie.
+    }
+  }
+
+  int? _metadataInt(Object? value) => switch (value) {
+        int value => value,
+        num value => value.toInt(),
+        _ => null,
+      };
+
+  DateTime? _metadataDate(Object? value) {
+    final milliseconds = _metadataInt(value);
+    return milliseconds == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(milliseconds);
+  }
+
+  bool existsSync() {
+    if (Platform.isAndroid && path.startsWith('content://')) {
+      return true; // Assume exists for SAF paths for now, or use metadata if available
+    }
+    return entity.existsSync();
+  }
+
+  Directory get parent => entity.parent;
+
+  FileEntity get absolute => FileEntity(
+        entity.absolute,
+        selected: selected,
+        error: error,
+        newName: _newName,
+      );
+
+  String fileOrDir([bool returnLink = false]) {
+    if (entity is Link) {
+      if (returnLink) return 'Link';
+      // Let the OS resolve relative targets and detect cycles. Unresolvable
+      // links belong in the file list, so they can still be inspected/removed.
+      return FileSystemEntity.typeSync(path) == FileSystemEntityType.directory
+          ? 'Dir'
+          : 'File';
     }
 
-    if (file is File) {
+    if (entity is File) {
       return 'File';
-    } else if (file is Directory) {
+    } else if (entity is Directory) {
       return 'Dir';
     }
 
@@ -78,30 +162,42 @@ extension ExFile on FileSystemEntity {
 }
 
 extension ExXFile on XFile {
-  FileSystemEntity toFileSystemEntity() => _toFileSystemEntity(this, (xFile) => xFile.path);
+  FileEntity toFileEntity() => FileEntity(toFileSystemEntity());
+  FileSystemEntity toFileSystemEntity() =>
+      _toFileSystemEntity(this, (xFile) => xFile.path);
 }
 
 extension ExPlatformFile on PlatformFile {
-  FileSystemEntity toFileSystemEntity() => _toFileSystemEntity(this, (file) => file.path ?? '');
+  FileEntity toFileEntity() => FileEntity(toFileSystemEntity());
+  FileSystemEntity toFileSystemEntity() =>
+      _toFileSystemEntity(this, (file) => file.path ?? '');
 }
 
 extension ExLink on Link {
-  FileSystemEntity toFileSystemEntity() => _toFileSystemEntity(this, (link) => link.targetSync());
+  FileSystemEntity toFileSystemEntity() =>
+      _toFileSystemEntity(this, (link) => link.resolveSymbolicLinksSync());
 }
 
 extension ExPathString on String {
-  FileSystemEntity toFileSystemEntity() => _toFileSystemEntity(this, (str) => str);
+  FileEntity toFileEntity() => FileEntity(toFileSystemEntity());
+  FileSystemEntity toFileSystemEntity() =>
+      _toFileSystemEntity(this, (str) => str);
 
   // usually causes the talkback to choose a wrong language.
-  String toFilenameSemanticLabel() => RegExp(r'([a-zA-Z]+|\d.{0,3}|[^a-zA-Z0-9]+)').allMatches(this).map((e) => e.group(0)).join('，');
+  String toFilenameSemanticLabel() =>
+      RegExp(r'([a-zA-Z]+|\d.{0,3}|[^a-zA-Z0-9]+)')
+          .allMatches(this)
+          .map((e) => e.group(0))
+          .join('，');
 }
 
 FileSystemEntity _toFileSystemEntity<T>(T file, String Function(T file) func) {
-  FileSystemEntity entity;
-
-  entity = File(func.call(file));
-  if (!entity.existsSync()) entity = Directory(func.call(file));
-  if (!entity.existsSync()) entity = Link(func.call(file));
-
-  return entity;
+  final path = func(file);
+  // Keep the selected link itself as the rename source, including dangling
+  // links. A missing path must not be mistaken for a link.
+  return switch (FileSystemEntity.typeSync(path, followLinks: false)) {
+    FileSystemEntityType.directory => Directory(path),
+    FileSystemEntityType.link => Link(path),
+    _ => File(path),
+  };
 }

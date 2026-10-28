@@ -1,4 +1,54 @@
 {
+  "mappingMenu": "Naming table",
+  "importMapping": "Import CSV / TSV mapping",
+  "exportMapping": "Export current preview as CSV",
+  "clearMapping": "Clear mapping and resume rules",
+  "mappingHint": "Import a UTF-8 table with source,new_name columns. Sources must already be loaded.",
+  "mappingActive": "Mapping mode: rules paused; only mapped items are targeted.",
+  "mappingRowError": "Row {row}: {reason}",
+  "mappingFormatError": "Invalid UTF-8 CSV/TSV. Use source,new_name headers and two columns, with at least one mapping.",
+  "mappingSourceError": "Source must be an absolute path or content URI matching a loaded item. Export a template first.",
+  "mappingDuplicateError": "Duplicate source. Each source may appear only once.",
+  "mappingNameError": "New name must be a filename, without path separators, control characters, reserved names or trailing dots/spaces.",
+  "mappingSizeError": "Mapping files must not exceed 5 MiB.",
+  "@mappingRowError": {
+    "placeholders": {
+      "row": {
+        "type": "int"
+      },
+      "reason": {
+        "type": "String"
+      }
+    }
+  },
+  "renameScope": "Rename scope",
+  "scopeVisible": "Current filtered results",
+  "scopeAll": "All loaded items",
+  "scopeSelected": "Selected items (including hidden)",
+  "renameTargetSummary": "{count} items in scope · {hidden} hidden",
+  "renameCount": "Rename ({count})",
+  "@renameTargetSummary": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "hidden": {
+        "type": "int"
+      }
+    }
+  },
+  "@renameCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "importRulesBefore": "Add before existing rules",
+  "importRulesAfter": "Add after existing rules",
+  "importRulesReplace": "Replace existing rules",
+  "noValidRules": "The file contains no valid rules or could not be read.",
+
   "@@locale": "en",
   "appName": "Flut Renamer",
   "lowercaseAppName": "flut renamer",
@@ -31,6 +81,10 @@
   "removeRenamed": "Remove renamed files",
   "removeRule": "Remove this rule",
   "removeRules": "Remove rules after renaming",
+  "viewLog": "View Log",
+  "logEmpty": "Log is empty.",
+  "saveRules": "Save Rules",
+  "loadRules": "Load Rules",
   "addRule": "Add Rule",
   "removeAll": "Remove all",
   "replace": "Replace",
@@ -52,6 +106,8 @@
   "filter": "Filter",
   "addFile": "Add file",
   "addFiles": "Add files",
+  "addFilesAndroid": "Choose one or more files to rename. Android may ask you to confirm changes to media files.",
+  "addedFilesCannotRename": "Some files cannot be renamed and were ignored.",
   "dragToAdd": "Drag and drop to add files.",
   "dropToAdd": "Drop to add files.",
   "dragNotSupported": "Due to system security restriction, drag-drop files from this app is not supported.",
@@ -75,6 +131,7 @@
   "errorDetails": "Error details",
   "ifFileNotShown": "If files does not shown in file list, please clear all and continue.",
   "metadataTags": "Metadata tags",
+  "dateFormat": "Date format",
   "osTodayDate": "Date of today",
   "osNowTime": "Time of now",
   "fileSize": "Size of file",
@@ -109,6 +166,7 @@
   "musicWriter": "Writer of the track",
   "prefix": "Prefix",
   "startIndex": "Start index",
+  "numberOfDigits": "Number of digits",
   "indexIncrementalStep": "Index incremental step",
   "omitDash": "Omit dash",
   "ignoreExtension": "Ignore Extension",
@@ -306,5 +364,18 @@
         "type": "String"
       }
     }
-  }
+  },
+  "insertRandomString": "Insert random string",
+  "randomStringLength": "Random string length",
+  "randomStringLengthHint": "8",
+  "randomStringLengthError": "Length should be between 1 and 32",
+  "hapticFeedback": "Haptic feedback",
+  "showThumbnails": "Image thumbnails",
+  "numberingMode": "Numbering mode",
+  "replaceOriginalName": "Replace original name",
+  "insertIntoOriginalName": "Insert into original name",
+  "descriptionInsertNumber": "Insert the number with its surrounding text while keeping the original name.",
+  "numberPrefix": "Text before number",
+  "numberSuffix": "Text after number",
+  "numberPositionHint": "Position 0 inserts at the start, or at the end when counting from the end."
 }
